@@ -243,6 +243,18 @@ function processNewEmails() {
           processedCount++;
           continue;
         }
+        // Guest/refund language can co-occur with payment-pressure phrasing that
+        // only counts as Path A scam when urgent or from an external automated
+        // sender. Ambiguous client + scam-keyword cases need human review.
+        if (checkKeywords(text, SCAM_KEYWORDS)) {
+          Logger.log("Classification: AMBIGUOUS (client + scam) -> _NeedsReview");
+          if (!CONFIG.DRY_RUN) {
+            applyLabel(thread, CONFIG.LABEL_NEEDS_REVIEW);
+            markProcessed(thread);
+          }
+          processedCount++;
+          continue;
+        }
         Logger.log("Classification: CLIENT INQUIRY -> draft prepared (not sent)");
         const draftReplyText = generateProfessionalDraft(from, subject, snippet);
         if (!CONFIG.DRY_RUN) {
