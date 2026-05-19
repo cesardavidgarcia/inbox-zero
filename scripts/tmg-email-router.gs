@@ -164,7 +164,7 @@ function processNewEmails() {
     let scamEmails = [];
     let urgentEmails = [];
     let clientDraftsCreated = [];
-    const coldFlagMap = getColdFlagMap();
+    const newColdFlags = {};
 
     for (const thread of inboxThreads) {
       if (hasLabel(thread, CONFIG.LABEL_PROCESSED)) continue;
@@ -264,7 +264,7 @@ function processNewEmails() {
           applyLabel(thread, CONFIG.LABEL_COLD_EMAIL);
           markProcessed(thread);
           thread.moveToArchive();
-          coldFlagMap[thread.getId()] = Date.now();
+          newColdFlags[thread.getId()] = Date.now();
         }
         coldFlaggedCount++;
         processedCount++;
@@ -294,7 +294,17 @@ function processNewEmails() {
       processedCount++;
     }
 
-    if (!CONFIG.DRY_RUN) saveColdFlagMap(coldFlagMap);
+    if (!CONFIG.DRY_RUN && Object.keys(newColdFlags).length > 0) {
+      withColdFlagMapLock(function() {
+        const fresh = getColdFlagMap();
+        for (const tid in newColdFlags) {
+          if (Object.prototype.hasOwnProperty.call(newColdFlags, tid)) {
+            fresh[tid] = newColdFlags[tid];
+          }
+        }
+        saveColdFlagMap(fresh);
+      });
+    }
 
     if (scamEmails.length || urgentEmails.length || clientDraftsCreated.length ||
         promoTrashedCount || coldFlaggedCount) {
@@ -329,6 +339,7 @@ function purgeFlaggedColdEmails() {
     const now = Date.now();
     const flagMap = getColdFlagMap();
     const nextFlagMap = {};
+    const threadIdsWeSaw = {};
 
     let trashedCount = 0;
     let rescuedCount = 0;
@@ -336,6 +347,7 @@ function purgeFlaggedColdEmails() {
 
     for (const thread of threads) {
       const threadId = thread.getId();
+      threadIdsWeSaw[threadId] = true;
 
       // Rescue: the owner engaged with it (replied) or moved it back to inbox.
       if (threadHasReplyFromBoss(thread) || thread.isInInbox()) {
@@ -366,7 +378,23 @@ function purgeFlaggedColdEmails() {
       trashedCount++;
     }
 
-    if (!CONFIG.DRY_RUN) saveColdFlagMap(nextFlagMap);
+    if (!CONFIG.DRY_RUN) {
+      withColdFlagMapLock(function() {
+        const fresh = getColdFlagMap();
+        const finalMap = {};
+        for (const id in fresh) {
+          if (Object.prototype.hasOwnProperty.call(fresh, id) && !threadIdsWeSaw[id]) {
+            finalMap[id] = fresh[id];
+          }
+        }
+        for (const id in nextFlagMap) {
+          if (Object.prototype.hasOwnProperty.call(nextFlagMap, id)) {
+            finalMap[id] = fresh[id] != null ? fresh[id] : nextFlagMap[id];
+          }
+        }
+        saveColdFlagMap(finalMap);
+      });
+    }
 
     Logger.log("=== COLD-EMAIL PURGE COMPLETE ===");
     Logger.log("Trashed: " + trashedCount + " | Rescued: " + rescuedCount +
@@ -540,6 +568,20 @@ function getColdFlagMap() {
 function saveColdFlagMap(map) {
   PropertiesService.getScriptProperties()
     .setProperty(COLD_PROP_FLAG_DATES, JSON.stringify(map));
+}
+
+/**
+ * Runs fn while holding the script lock so cold-flag map read/merge/write
+ * sequences from processNewEmails and purgeFlaggedColdEmails cannot interleave.
+ */
+function withColdFlagMapLock(fn) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    fn();
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 // ===== HELPER FUNCTIONS =====
