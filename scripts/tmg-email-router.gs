@@ -34,8 +34,10 @@ const CONFIG = {
   CHECK_INTERVAL_MINUTES: 10,
   MAX_PROCESS_PER_RUN: 20,
 
-  // SAFETY SWITCH. While true, the script only logs what it WOULD do.
-  // Set to false to let it trash junk and process cold mail for real.
+  // SAFETY SWITCH. While true, the script does NOT modify any mail: it never
+  // trashes, archives, labels, or drafts. It still writes its execution log
+  // and still emails the summary/report so you can review what it WOULD do.
+  // Set to false to let it act for real.
   DRY_RUN: true,
 
   // Gmail label workflow
@@ -242,9 +244,12 @@ function processNewEmails() {
       }
 
       // Path E: Junk / promotional. Trashed immediately (automatic).
+      // Marked _Processed first so that, if you recover a false positive
+      // from Trash back to the inbox, it is not re-classified and re-trashed.
       if (isPromo) {
         Logger.log("Classification: JUNK / PROMOTIONAL -> trashed");
         if (!CONFIG.DRY_RUN) {
+          markProcessed(thread);
           thread.moveToTrash();
         }
         promoTrashedCount++;
