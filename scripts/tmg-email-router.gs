@@ -224,6 +224,20 @@ function processNewEmails() {
 
       // Path C: Client / guest inquiry. A DRAFT is prepared, never sent.
       if (isClient) {
+        // A genuine guest inquiry can share vocabulary with a cold sales
+        // pitch ("villa", "cleaning", "reservation"). If the email ALSO
+        // carries cold-outreach signals it is ambiguous -- route it to
+        // _NeedsReview for a human decision rather than drafting a reply
+        // (could be a pitch) or auto-archiving it (could be a real guest).
+        if (isColdEmail(from, subject, snippet)) {
+          Logger.log("Classification: AMBIGUOUS (client + cold) -> _NeedsReview");
+          if (!CONFIG.DRY_RUN) {
+            applyLabel(thread, CONFIG.LABEL_NEEDS_REVIEW);
+            markProcessed(thread);
+          }
+          processedCount++;
+          continue;
+        }
         Logger.log("Classification: CLIENT INQUIRY -> draft prepared (not sent)");
         const draftReplyText = generateProfessionalDraft(from, subject, snippet);
         if (!CONFIG.DRY_RUN) {
@@ -770,6 +784,10 @@ function sendRouterNotificationSummary(scamList, urgentList, clientDraftList,
 
   body += "-------------------------------------------------\n";
   body += "Automated notification from the TMG Email Manager script.";
+
+  // Keep the DRY_RUN status in the subject, consistent with the other
+  // report emails, so a dry-run scam alert is not mistaken for a live one.
+  subject += " (DRY_RUN: " + CONFIG.DRY_RUN + ")";
 
   try {
     GmailApp.sendEmail(CONFIG.NOTIFY_EMAIL, subject, body);
