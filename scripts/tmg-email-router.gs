@@ -131,10 +131,12 @@ const SCAM_KEYWORDS = [
 
 // Guest / reservation inquiry language.
 const CLIENT_KEYWORDS = [
-  "refund", "complaint", "cancel", "receipt", "invoice", "damage", "broken",
+  "refund", "complaint", "cancel", "cancellation", "cancelled", "canceled",
+  "receipt", "invoice", "damage", "broken",
   "not satisfied", "disappointed", "overcharge", "cleaning", "noise", "key",
-  "lockbox", "wifi", "pool", "air condition", "hot water", "towel",
-  "amenities", "early check", "late check", "extend stay", "modify booking",
+  "lockbox", "wifi", "pool", "air condition", "air conditioning", "hot water",
+  "towel", "amenities", "early check", "late check", "extend stay",
+  "extended stay", "modify booking",
   "compensation", "upgrade", "reservation", "check-in", "checkout",
   "my booking", "my stay", "villa", "confirmation", "new reservation",
   "booking confirmed", "reservation confirmed"
@@ -635,7 +637,8 @@ function checkPromotional(subject, snippet, from) {
 
   let promoScore = 0;
   for (const term of PROMO_KEYWORDS) {
-    if (combined.indexOf(term.toLowerCase()) !== -1) promoScore++;
+    const pattern = new RegExp("\\b" + escapeRegex(term.toLowerCase()) + "\\b");
+    if (pattern.test(combined)) promoScore++;
   }
 
   const automated = isExternalAutomated(from);
