@@ -193,7 +193,9 @@ function processNewEmails() {
       const isClient = checkKeywords(text, CLIENT_KEYWORDS) &&
         !isAutomatedAddress(from);
       const isPromo = checkPromotional(subject, snippet, from);
-      const isCold = isColdEmail(from, subject, snippet);
+      // isCold is evaluated lazily in Path D below: isColdEmail() runs a
+      // GmailApp.search(), so it is only worth computing once the cheaper,
+      // higher-priority paths (scam, urgent, client) have been ruled out.
 
       // Path A: Suspected scam. Flagged for caution, NOT marked important.
       if (isScam) {
@@ -236,7 +238,7 @@ function processNewEmails() {
 
       // Path D: Cold outreach from an unknown sender. Flagged + archived now;
       // auto-trashed later by purgeFlaggedColdEmails after the grace period.
-      if (isCold) {
+      if (isColdEmail(from, subject, snippet)) {
         Logger.log("Classification: COLD OUTREACH -> flagged _ColdEmail (trash in " +
           CONFIG.COLD_EMAIL_TRASH_AFTER_DAYS + "d)");
         if (!CONFIG.DRY_RUN) {
