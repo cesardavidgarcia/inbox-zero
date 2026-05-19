@@ -64,6 +64,11 @@ const CLUTTER_PROP_SCANNED = "CLUTTER_REVIEW_SCANNED";
 const CLUTTER_PROP_TRASHED = "CLUTTER_REVIEW_TRASHED";
 const CLUTTER_PROP_BYPASSED = "CLUTTER_REVIEW_BYPASSED";
 
+// Script-property key holding a {threadId: flaggedAtMillis} map so the cold-
+// email grace period is measured from when a thread was flagged, not from
+// when its message was received.
+const COLD_PROP_FLAG_DATES = "COLD_EMAIL_FLAG_DATES";
+
 // Consumer email domains that can never be auto-classified as promotional.
 const PERSONAL_DOMAINS = [
   "gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "icloud.com",
@@ -157,6 +162,7 @@ function processNewEmails() {
     let scamEmails = [];
     let urgentEmails = [];
     let clientDraftsCreated = [];
+    const coldFlagMap = getColdFlagMap();
 
     for (const thread of inboxThreads) {
       if (hasLabel(thread, CONFIG.LABEL_PROCESSED)) continue;
@@ -237,6 +243,7 @@ function processNewEmails() {
           applyLabel(thread, CONFIG.LABEL_COLD_EMAIL);
           markProcessed(thread);
           thread.moveToArchive();
+          coldFlagMap[thread.getId()] = Date.now();
         }
         coldFlaggedCount++;
         processedCount++;
@@ -265,6 +272,8 @@ function processNewEmails() {
       }
       processedCount++;
     }
+
+    if (!CONFIG.DRY_RUN) saveColdFlagMap(coldFlagMap);
 
     if (scamEmails.length || urgentEmails.length || clientDraftsCreated.length ||
         promoTrashedCount || coldFlaggedCount) {
@@ -297,15 +306,17 @@ function purgeFlaggedColdEmails() {
     const threads = coldLabel.getThreads();
     const cutoffMs = CONFIG.COLD_EMAIL_TRASH_AFTER_DAYS * 24 * 60 * 60 * 1000;
     const now = Date.now();
+    const flagMap = getColdFlagMap();
+    const nextFlagMap = {};
 
     let trashedCount = 0;
     let rescuedCount = 0;
     let waitingCount = 0;
 
     for (const thread of threads) {
-      const ageMs = now - thread.getLastMessageDate().getTime();
+      const threadId = thread.getId();
 
-      // Rescue: you engaged with it (replied) or moved it back to the inbox.
+      // Rescue: the owner engaged with it (replied) or moved it back to inbox.
       if (threadHasReplyFromBoss(thread) || thread.isInInbox()) {
         Logger.log("[RESCUE] engaged thread, unflagging: " +
           thread.getFirstMessageSubject());
@@ -314,8 +325,15 @@ function purgeFlaggedColdEmails() {
         continue;
       }
 
-      if (ageMs < cutoffMs) {
+      // Grace period is measured from when the thread was flagged _ColdEmail,
+      // not from when its message was received -- so a thread that was
+      // already old when flagged (e.g. backlog at first deployment) still
+      // gets a full rescue window. A thread with no recorded flag date (map
+      // lost, or flagged before this tracking existed) starts its clock now.
+      const flaggedAt = flagMap[threadId] || now;
+      if (now - flaggedAt < cutoffMs) {
         waitingCount++;
+        nextFlagMap[threadId] = flaggedAt;
         continue;
       }
 
@@ -323,6 +341,8 @@ function purgeFlaggedColdEmails() {
       if (!CONFIG.DRY_RUN) thread.moveToTrash();
       trashedCount++;
     }
+
+    if (!CONFIG.DRY_RUN) saveColdFlagMap(nextFlagMap);
 
     Logger.log("=== COLD-EMAIL PURGE COMPLETE ===");
     Logger.log("Trashed: " + trashedCount + " | Rescued: " + rescuedCount +
@@ -478,6 +498,24 @@ function addToProperty(props, key, delta) {
   const next = parseInt(props.getProperty(key) || "0", 10) + delta;
   props.setProperty(key, String(next));
   return next;
+}
+
+/** Reads the {threadId: flaggedAtMillis} cold-email tracking map. */
+function getColdFlagMap() {
+  const raw = PropertiesService.getScriptProperties().getProperty(COLD_PROP_FLAG_DATES);
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    Logger.log("[WARN] cold-flag map unreadable, resetting: " + e.message);
+    return {};
+  }
+}
+
+/** Persists the {threadId: flaggedAtMillis} cold-email tracking map. */
+function saveColdFlagMap(map) {
+  PropertiesService.getScriptProperties()
+    .setProperty(COLD_PROP_FLAG_DATES, JSON.stringify(map));
 }
 
 // ===== HELPER FUNCTIONS =====
