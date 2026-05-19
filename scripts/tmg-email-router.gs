@@ -771,6 +771,8 @@ function sendRouterNotificationSummary(scamList, urgentList, clientDraftList,
   body += "-------------------------------------------------\n";
   body += "Automated notification from the TMG Email Manager script.";
 
+  subject += " (DRY_RUN: " + CONFIG.DRY_RUN + ")";
+
   try {
     GmailApp.sendEmail(CONFIG.NOTIFY_EMAIL, subject, body);
     Logger.log("Summary report emailed.");
