@@ -231,7 +231,10 @@ function processNewEmails() {
         // carries cold-outreach signals it is ambiguous -- route it to
         // _NeedsReview for a human decision rather than drafting a reply
         // (could be a pitch) or auto-archiving it (could be a real guest).
-        if (isColdEmail(from, subject, snippet)) {
+        // hasColdOutreachSignals (not isColdEmail) is used so the guard
+        // still fires for personal-domain senders; _NeedsReview is a safe
+        // human-review bucket, never an auto-trash.
+        if (hasColdOutreachSignals(from, subject, snippet)) {
           Logger.log("Classification: AMBIGUOUS (client + cold) -> _NeedsReview");
           if (!CONFIG.DRY_RUN) {
             applyLabel(thread, CONFIG.LABEL_NEEDS_REVIEW);
@@ -356,7 +359,10 @@ function purgeFlaggedColdEmails() {
       }
 
       Logger.log("[TRASH COLD] " + thread.getFirstMessageSubject());
-      if (!CONFIG.DRY_RUN) thread.moveToTrash();
+      if (!CONFIG.DRY_RUN) {
+        thread.removeLabel(coldLabel);
+        thread.moveToTrash();
+      }
       trashedCount++;
     }
 
@@ -617,15 +623,26 @@ function hasPriorRelationship(fromHeader) {
 }
 
 /**
- * Detects unsolicited cold outreach: cold-pitch phrasing from an external
- * sender we have never emailed before. Trusted and personal-domain senders
- * are exempt, as is anyone we already correspond with.
+ * True when an email carries cold-pitch phrasing from an external sender we
+ * have never corresponded with. Trusted senders are exempt; personal-domain
+ * senders are NOT -- a cold pitch can still arrive from a gmail.com account.
+ * This is the raw signal used both by isColdEmail and by the Path C
+ * client-vs-cold ambiguity guard.
  */
-function isColdEmail(fromHeader, subject, snippet) {
+function hasColdOutreachSignals(fromHeader, subject, snippet) {
   if (isTrustedSender(fromHeader)) return false;
-  if (checkPersonalDomainWhitelist(fromHeader)) return false;
   if (!checkKeywords(subject + " " + snippet, COLD_EMAIL_KEYWORDS)) return false;
   return !hasPriorRelationship(fromHeader);
+}
+
+/**
+ * Detects unsolicited cold outreach for the auto-trash path (Path D).
+ * Personal-domain senders are exempt here so genuine guests emailing from
+ * a gmail.com/yahoo.com account are never auto-archived or trashed.
+ */
+function isColdEmail(fromHeader, subject, snippet) {
+  if (checkPersonalDomainWhitelist(fromHeader)) return false;
+  return hasColdOutreachSignals(fromHeader, subject, snippet);
 }
 
 /** Conservative promotional classifier. Trusted senders are never promotional. */
@@ -830,11 +847,12 @@ function testEmailClassification() {
       !isAutomatedAddress(tc.from);
     const isPromo = checkPromotional(tc.subject, tc.snippet, tc.from);
     const isCold = isColdEmail(tc.from, tc.subject, tc.snippet);
+    const isColdSignal = hasColdOutreachSignals(tc.from, tc.subject, tc.snippet);
 
     let classification = "UNKNOWN / REVIEW";
     if (isScam) classification = "SUSPECTED SCAM";
     else if (isUrgent) classification = "URGENT / WARNING";
-    else if (isClient) classification = isCold
+    else if (isClient) classification = isColdSignal
       ? "AMBIGUOUS (client + cold) -> _NeedsReview"
       : "CLIENT DRAFT REPLY";
     else if (isCold) classification = "COLD OUTREACH (flag + auto-trash)";
@@ -870,12 +888,20 @@ function installAutomatedTriggers() {
     CONFIG.CHECK_INTERVAL_MINUTES + " minutes; purgeFlaggedColdEmails daily.");
 }
 
+/**
+ * Deletes the recurring automation triggers only. A pending
+ * reviewOldClutterMore continuation trigger is intentionally left alone so
+ * an in-progress backlog review can finish and emit its final summary.
+ */
 function removeTriggers() {
+  const managed = ["processNewEmails", "purgeFlaggedColdEmails"];
   const triggers = ScriptApp.getProjectTriggers();
   for (const trigger of triggers) {
-    ScriptApp.deleteTrigger(trigger);
+    if (managed.indexOf(trigger.getHandlerFunction()) !== -1) {
+      ScriptApp.deleteTrigger(trigger);
+    }
   }
-  Logger.log("All time triggers deleted.");
+  Logger.log("Recurring automation triggers deleted.");
 }
 
 // ===== ERROR HANDLING =====
