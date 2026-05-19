@@ -1,16 +1,18 @@
 /**
  * =============================================================================
  * PROJECT: TMG Secure Email Router & Backlog Cleanup (v7.0)
- * PURPOSE: Triages Cesar's inbox with labels, auto-trashes junk/promotional
- *          mail, detects cold outreach and auto-trashes it after a grace
- *          period, and prepares (but never sends) draft replies to guests.
+ * PURPOSE: Triages Cesar's inbox with labels, archives junk/promotional mail
+ *          (labelled _Promotional, never Trash), detects cold outreach and
+ *          archives it after a grace period once the _ColdEmail label is
+ *          removed, and prepares (but never sends) draft replies to guests.
  * DEPLOYMENT ACCOUNT: cesar@themarucagroup.com
  *
  * BEHAVIOUR SUMMARY:
- *  - Junk / promotional mail        -> trashed immediately (automatic).
- *  - Cold outreach (unknown sender) -> labelled _ColdEmail, then trashed
- *                                      automatically after COLD_EMAIL_TRASH_
- *                                      AFTER_DAYS (default 10) days.
+ *  - Junk / promotional mail        -> labelled _Promotional and archived.
+ *  - Cold outreach (unknown sender) -> labelled _ColdEmail and archived; after
+ *                                      COLD_EMAIL_TRASH_AFTER_DAYS (default 10)
+ *                                      days the cold label is cleared and the
+ *                                      thread stays archived (never Trash).
  *  - Suspected scam                 -> labelled _SuspectedScam (kept, not
  *                                      elevated).
  *  - Urgent / warning               -> labelled _Urgent, marked important.
@@ -18,10 +20,11 @@
  *  - Unclassified                   -> labelled _NeedsReview, kept in inbox.
  *
  * SAFETY NOTES:
- *  - Client / urgent / scam mail and trusted senders are NEVER trashed.
+ *  - The script never moves mail to Trash and never sends mail automatically.
+ *  - Client / urgent / scam mail and trusted senders are never archived as
+ *    promotional clutter by the router.
  *  - Cold mail sits under the _ColdEmail label for the grace period so you
- *    can rescue anything mislabelled before it is trashed.
- *  - Gmail keeps trashed mail recoverable for 30 days regardless.
+ *    can rescue anything mislabelled before it is auto-archived.
  *  - Draft replies are never sent automatically -- you review and send them.
  * =============================================================================
  */
@@ -35,7 +38,7 @@ const CONFIG = {
   MAX_PROCESS_PER_RUN: 20,
 
   // SAFETY SWITCH. While true, the script does NOT modify any mail: it never
-  // trashes, archives, labels, or drafts. It still writes its execution log
+  // archives, labels, or drafts. It still writes its execution log
   // and still emails the summary/report so you can review what it WOULD do.
   // Set to false to let it act for real.
   DRY_RUN: true,
@@ -46,10 +49,11 @@ const CONFIG = {
   LABEL_SUSPECTED_SCAM: "_SuspectedScam",
   LABEL_DRAFT_PENDING: "_DraftPending",
   LABEL_COLD_EMAIL: "_ColdEmail",
+  LABEL_PROMOTIONAL: "_Promotional",
   LABEL_NEEDS_REVIEW: "_NeedsReview",
 
-  // Cold-email grace period: flagged cold mail is auto-trashed after this many
-  // days. Until then it lives under the _ColdEmail label so you can rescue it.
+  // Cold-email grace period: after this many days, the _ColdEmail label is
+  // removed and the thread remains archived (nothing is moved to Trash).
   COLD_EMAIL_TRASH_AFTER_DAYS: 10,
 
   // Historical backlog review limits
@@ -72,7 +76,7 @@ const PERSONAL_DOMAINS = [
 ];
 
 // Known business senders (booking platforms, vendors, partners). Mail from
-// these domains is never trashed, labelled promotional, or flagged cold.
+// these domains are never archived as promotional, labelled _Promotional, or flagged cold.
 // EDIT THIS to match the real domains TMG actually transacts with.
 const TRUSTED_DOMAINS = [
   "themarucagroup.com",
@@ -139,8 +143,8 @@ const CLIENT_KEYWORDS = [
 
 /**
  * Triggered: scans the inbox and routes each new thread.
- * Trashes junk/promotional mail automatically. Flags cold mail.
- * Never sends mail automatically.
+ * Archives junk/promotional mail (labelled _Promotional). Flags cold mail.
+ * Never sends mail automatically and never moves mail to Trash.
  */
 function processNewEmails() {
   Logger.log("=== TMG EMAIL ROUTER RUNNING (v7.0) ===");
@@ -152,7 +156,7 @@ function processNewEmails() {
     Logger.log("Retrieved " + inboxThreads.length + " threads from inbox.");
 
     let processedCount = 0;
-    let promoTrashedCount = 0;
+    let promoArchivedCount = 0;
     let coldFlaggedCount = 0;
     let scamEmails = [];
     let urgentEmails = [];
@@ -229,9 +233,9 @@ function processNewEmails() {
       }
 
       // Path D: Cold outreach from an unknown sender. Flagged + archived now;
-      // auto-trashed later by purgeFlaggedColdEmails after the grace period.
+      // after the grace period, purgeFlaggedColdEmails removes the label only.
       if (isCold) {
-        Logger.log("Classification: COLD OUTREACH -> flagged _ColdEmail (trash in " +
+        Logger.log("Classification: COLD OUTREACH -> flagged _ColdEmail (archive after " +
           CONFIG.COLD_EMAIL_TRASH_AFTER_DAYS + "d)");
         if (!CONFIG.DRY_RUN) {
           applyLabel(thread, CONFIG.LABEL_COLD_EMAIL);
@@ -243,16 +247,17 @@ function processNewEmails() {
         continue;
       }
 
-      // Path E: Junk / promotional. Trashed immediately (automatic).
-      // Marked _Processed first so that, if you recover a false positive
-      // from Trash back to the inbox, it is not re-classified and re-trashed.
+      // Path E: Junk / promotional. Labelled and archived (never Trash).
+      // Marked _Processed first so that, if you move a false positive back to
+      // the inbox, it is not re-classified the same way.
       if (isPromo) {
-        Logger.log("Classification: JUNK / PROMOTIONAL -> trashed");
+        Logger.log("Classification: JUNK / PROMOTIONAL -> _Promotional + archived");
         if (!CONFIG.DRY_RUN) {
           markProcessed(thread);
-          thread.moveToTrash();
+          applyLabel(thread, CONFIG.LABEL_PROMOTIONAL);
+          thread.moveToArchive();
         }
-        promoTrashedCount++;
+        promoArchivedCount++;
         processedCount++;
         continue;
       }
@@ -267,9 +272,9 @@ function processNewEmails() {
     }
 
     if (scamEmails.length || urgentEmails.length || clientDraftsCreated.length ||
-        promoTrashedCount || coldFlaggedCount) {
+        promoArchivedCount || coldFlaggedCount) {
       sendRouterNotificationSummary(scamEmails, urgentEmails, clientDraftsCreated,
-        promoTrashedCount, coldFlaggedCount);
+        promoArchivedCount, coldFlaggedCount);
     }
 
     Logger.log("=== ROUTER CYCLE COMPLETE | Processed: " + processedCount + " ===");
@@ -279,12 +284,13 @@ function processNewEmails() {
 }
 
 /**
- * Triggered (daily): trashes cold-flagged mail once it is past the grace
- * period. A thread is rescued (and unflagged) if you replied to it or moved
- * it back to the inbox in the meantime.
+ * Triggered (daily): removes the _ColdEmail label from cold-flagged mail once
+ * it is past the grace period (threads stay archived; nothing goes to Trash).
+ * A thread is rescued (and unflagged) if you replied to it or moved it back
+ * to the inbox in the meantime.
  */
 function purgeFlaggedColdEmails() {
-  Logger.log("=== COLD-EMAIL AUTO-PURGE RUNNING ===");
+  Logger.log("=== COLD-EMAIL GRACE-PERIOD CLEANUP RUNNING ===");
   Logger.log("DRY_RUN Mode: " + CONFIG.DRY_RUN);
 
   try {
@@ -298,7 +304,7 @@ function purgeFlaggedColdEmails() {
     const cutoffMs = CONFIG.COLD_EMAIL_TRASH_AFTER_DAYS * 24 * 60 * 60 * 1000;
     const now = Date.now();
 
-    let trashedCount = 0;
+    let clearedCount = 0;
     let rescuedCount = 0;
     let waitingCount = 0;
 
@@ -319,25 +325,29 @@ function purgeFlaggedColdEmails() {
         continue;
       }
 
-      Logger.log("[TRASH COLD] " + thread.getFirstMessageSubject());
-      if (!CONFIG.DRY_RUN) thread.moveToTrash();
-      trashedCount++;
+      Logger.log("[ARCHIVE COLD] " + thread.getFirstMessageSubject());
+      if (!CONFIG.DRY_RUN) {
+        thread.removeLabel(coldLabel);
+        thread.moveToArchive();
+      }
+      clearedCount++;
     }
 
-    Logger.log("=== COLD-EMAIL PURGE COMPLETE ===");
-    Logger.log("Trashed: " + trashedCount + " | Rescued: " + rescuedCount +
+    Logger.log("=== COLD-EMAIL GRACE-PERIOD CLEANUP COMPLETE ===");
+    Logger.log("Cold label cleared (archived, not trashed): " + clearedCount +
+      " | Rescued: " + rescuedCount +
       " | Still within grace period: " + waitingCount);
 
-    if (trashedCount > 0 || rescuedCount > 0) {
+    if (clearedCount > 0 || rescuedCount > 0) {
       GmailApp.sendEmail(
         CONFIG.NOTIFY_EMAIL,
-        "Cold-Email Auto-Purge Report (DRY_RUN: " + CONFIG.DRY_RUN + ")",
-        "Cold-email auto-purge completed.\n\n" +
-        "- Cold emails trashed (past " + CONFIG.COLD_EMAIL_TRASH_AFTER_DAYS +
-        "-day grace period): " + trashedCount + "\n" +
+        "Cold-Email Grace-Period Report (DRY_RUN: " + CONFIG.DRY_RUN + ")",
+        "Cold-email grace-period cleanup completed.\n\n" +
+        "- Cold threads past " + CONFIG.COLD_EMAIL_TRASH_AFTER_DAYS +
+        "-day grace period (_ColdEmail label removed, archived): " + clearedCount + "\n" +
         "- Rescued (you replied or moved back to inbox): " + rescuedCount + "\n" +
         "- Still within grace period: " + waitingCount + "\n\n" +
-        "Trashed mail remains recoverable from Gmail Trash for 30 days."
+        "Nothing was moved to Trash; mail stays under All Mail."
       );
     }
   } catch (error) {
@@ -347,7 +357,8 @@ function purgeFlaggedColdEmails() {
 
 /**
  * Manual review utility for historical clutter. With DRY_RUN=true it only
- * reports; with DRY_RUN=false it trashes promotional/social backlog.
+ * reports; with DRY_RUN=false it labels _Promotional and archives backlog
+ * (never Trash).
  *
  * Large backlogs are handled automatically: when a run fills an entire page
  * (PURGE_BATCH_LIMIT threads) it schedules a one-shot trigger to continue
@@ -361,6 +372,7 @@ function reviewOldClutter() {
 
   try {
     removeClutterContinuationTriggers();
+    ensureLabelsExist();
     const props = PropertiesService.getScriptProperties();
     const offset = parseInt(props.getProperty(CLUTTER_PROP_OFFSET) || "0", 10);
 
@@ -374,7 +386,7 @@ function reviewOldClutter() {
     Logger.log("Found " + threads.length + " candidate threads on this page.");
 
     let scannedCount = 0;
-    let trashedCount = 0;
+    let archivedCount = 0;
     let bypassedClientCount = 0;
     let bypassedTrustedCount = 0;
 
@@ -403,23 +415,24 @@ function reviewOldClutter() {
         continue;
       }
 
-      Logger.log("[TRASH CLUTTER] " + subject + " | From: " + from);
+      Logger.log("[ARCHIVE CLUTTER] " + subject + " | From: " + from);
       if (!CONFIG.DRY_RUN) {
-        thread.moveToTrash();
+        applyLabel(thread, CONFIG.LABEL_PROMOTIONAL);
+        thread.moveToArchive();
       }
-      trashedCount++;
+      archivedCount++;
     }
 
     const bypassedCount = bypassedClientCount + bypassedTrustedCount;
     const totalScanned = addToProperty(props, CLUTTER_PROP_SCANNED, scannedCount);
-    const totalTrashed = addToProperty(props, CLUTTER_PROP_TRASHED, trashedCount);
+    const totalTrashed = addToProperty(props, CLUTTER_PROP_TRASHED, archivedCount);
     const totalBypassed = addToProperty(props, CLUTTER_PROP_BYPASSED, bypassedCount);
 
-    Logger.log("Page done. Scanned: " + scannedCount + " | Trashed: " +
-      trashedCount + " | Bypassed: " + bypassedCount);
+    Logger.log("Page done. Scanned: " + scannedCount + " | Archived: " +
+      archivedCount + " | Bypassed: " + bypassedCount);
 
     if (threads.length === CONFIG.PURGE_BATCH_LIMIT) {
-      // Trashed threads drop out of the search next run; bypassed ones do not,
+      // Archived threads drop out of the search next run; bypassed ones do not,
       // so the offset must skip past them. In DRY_RUN nothing is removed, so
       // skip every thread scanned on this page instead.
       const advanceBy = CONFIG.DRY_RUN ? scannedCount : bypassedCount;
@@ -441,9 +454,9 @@ function reviewOldClutter() {
       "Historical Inbox Cleanup Report (DRY_RUN: " + CONFIG.DRY_RUN + ")",
       "Backlog cleanup completed across all pages.\n\n" +
       "- Total threads scanned: " + totalScanned + "\n" +
-      "- Total clutter trashed: " + totalTrashed + "\n" +
+      "- Total clutter archived (_Promotional): " + totalTrashed + "\n" +
       "- Total safeguarded (client/urgent/trusted/personal): " + totalBypassed + "\n\n" +
-      "Trashed mail remains recoverable from Gmail Trash for 30 days."
+      "Nothing was moved to Trash; mail stays under All Mail."
     );
   } catch (error) {
     handleScriptError("reviewOldClutter", error);
@@ -564,11 +577,14 @@ function hasPriorRelationship(fromHeader) {
  * Detects unsolicited cold outreach: cold-pitch phrasing from an external
  * sender we have never emailed before. Trusted and personal-domain senders
  * are exempt, as is anyone we already correspond with.
+ * @param {boolean} [skipPriorRelationshipCheck] If true, skips the Gmail
+ *     prior-sent lookup (for deterministic tests only).
  */
-function isColdEmail(fromHeader, subject, snippet) {
+function isColdEmail(fromHeader, subject, snippet, skipPriorRelationshipCheck) {
   if (isTrustedSender(fromHeader)) return false;
   if (checkPersonalDomainWhitelist(fromHeader)) return false;
   if (!checkKeywords(subject + " " + snippet, COLD_EMAIL_KEYWORDS)) return false;
+  if (skipPriorRelationshipCheck) return true;
   return !hasPriorRelationship(fromHeader);
 }
 
@@ -666,6 +682,7 @@ function ensureLabelsExist() {
     CONFIG.LABEL_SUSPECTED_SCAM,
     CONFIG.LABEL_DRAFT_PENDING,
     CONFIG.LABEL_COLD_EMAIL,
+    CONFIG.LABEL_PROMOTIONAL,
     CONFIG.LABEL_NEEDS_REVIEW
   ];
   for (const name of requiredLabels) {
@@ -677,22 +694,22 @@ function ensureLabelsExist() {
 }
 
 function sendRouterNotificationSummary(scamList, urgentList, clientDraftList,
-                                       promoTrashedCount, coldFlaggedCount) {
+                                       promoArchivedCount, coldFlaggedCount) {
   let subject = "TMG Email Manager Summary Report";
   let body = "=== TMG EMAIL ROUTER SUMMARY ===\n";
   body += "Time: " + new Date().toLocaleString() + "\n";
   body += "DRY RUN MODE: " + CONFIG.DRY_RUN + "\n\n";
 
-  if (promoTrashedCount > 0) {
-    body += "Junk / promotional mail trashed automatically: " +
-      promoTrashedCount + " threads\n";
+  if (promoArchivedCount > 0) {
+    body += "Junk / promotional mail labelled _Promotional and archived: " +
+      promoArchivedCount + " threads\n";
   }
   if (coldFlaggedCount > 0) {
-    body += "Cold outreach flagged (_ColdEmail, auto-trash in " +
+    body += "Cold outreach flagged (_ColdEmail, label cleared after " +
       CONFIG.COLD_EMAIL_TRASH_AFTER_DAYS + " days): " + coldFlaggedCount +
       " threads\n";
   }
-  if (promoTrashedCount > 0 || coldFlaggedCount > 0) body += "\n";
+  if (promoArchivedCount > 0 || coldFlaggedCount > 0) body += "\n";
 
   if (scamList.length > 0) {
     subject = "ATTENTION: " + scamList.length + " suspected scam email(s) flagged";
@@ -763,14 +780,14 @@ function testEmailClassification() {
     const isClient = checkKeywords(text, CLIENT_KEYWORDS) &&
       !isAutomatedAddress(tc.from);
     const isPromo = checkPromotional(tc.subject, tc.snippet, tc.from);
-    const isCold = isColdEmail(tc.from, tc.subject, tc.snippet);
+    const isCold = isColdEmail(tc.from, tc.subject, tc.snippet, true);
 
     let classification = "UNKNOWN / REVIEW";
     if (isScam) classification = "SUSPECTED SCAM";
     else if (isUrgent) classification = "URGENT / WARNING";
     else if (isClient) classification = "CLIENT DRAFT REPLY";
-    else if (isCold) classification = "COLD OUTREACH (flag + auto-trash)";
-    else if (isPromo) classification = "JUNK / PROMOTIONAL (trash now)";
+    else if (isCold) classification = "COLD OUTREACH (flag + grace-period cleanup)";
+    else if (isPromo) classification = "JUNK / PROMOTIONAL (_Promotional + archive)";
 
     Logger.log("[TEST " + (i + 1) + "] " + tc.subject + " | " + tc.from);
     Logger.log("         ===> " + classification);
