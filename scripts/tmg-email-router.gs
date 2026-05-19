@@ -193,7 +193,14 @@ function processNewEmails() {
       const isClient = checkKeywords(text, CLIENT_KEYWORDS) &&
         !isAutomatedAddress(from);
       const isPromo = checkPromotional(subject, snippet, from);
-      const isCold = isColdEmail(from, subject, snippet);
+
+      // Cold outreach uses GmailApp.search (prior relationship). Only evaluate
+      // after scam/urgent, and when isClient: compute once to prefer cold over
+      // generic client keywords in pitches (e.g. "villa" + "we specialize in").
+      let isCold;
+      if (!isScam && !isUrgent && isClient) {
+        isCold = isColdEmail(from, subject, snippet);
+      }
 
       // Path A: Suspected scam. Flagged for caution, NOT marked important.
       if (isScam) {
@@ -221,7 +228,8 @@ function processNewEmails() {
       }
 
       // Path C: Client / guest inquiry. A DRAFT is prepared, never sent.
-      if (isClient) {
+      // Skip when cold-outreach signals win over generic hospitality/client terms.
+      if (isClient && !isCold) {
         Logger.log("Classification: CLIENT INQUIRY -> draft prepared (not sent)");
         const draftReplyText = generateProfessionalDraft(from, subject, snippet);
         if (!CONFIG.DRY_RUN) {
@@ -236,7 +244,7 @@ function processNewEmails() {
 
       // Path D: Cold outreach from an unknown sender. Flagged + archived now;
       // auto-trashed later by purgeFlaggedColdEmails after the grace period.
-      if (isCold) {
+      if (isCold === true || (!isClient && (isCold = isColdEmail(from, subject, snippet)))) {
         Logger.log("Classification: COLD OUTREACH -> flagged _ColdEmail (trash in " +
           CONFIG.COLD_EMAIL_TRASH_AFTER_DAYS + "d)");
         if (!CONFIG.DRY_RUN) {
@@ -806,13 +814,18 @@ function testEmailClassification() {
     const isClient = checkKeywords(text, CLIENT_KEYWORDS) &&
       !isAutomatedAddress(tc.from);
     const isPromo = checkPromotional(tc.subject, tc.snippet, tc.from);
-    const isCold = isColdEmail(tc.from, tc.subject, tc.snippet);
+
+    let isCold;
+    if (!isScam && !isUrgent && isClient) {
+      isCold = isColdEmail(tc.from, tc.subject, tc.snippet);
+    }
 
     let classification = "UNKNOWN / REVIEW";
     if (isScam) classification = "SUSPECTED SCAM";
     else if (isUrgent) classification = "URGENT / WARNING";
-    else if (isClient) classification = "CLIENT DRAFT REPLY";
-    else if (isCold) classification = "COLD OUTREACH (flag + auto-trash)";
+    else if (isClient && !isCold) classification = "CLIENT DRAFT REPLY";
+    else if (isCold === true || (!isClient && (isCold = isColdEmail(tc.from, tc.subject, tc.snippet))))
+      classification = "COLD OUTREACH (flag + auto-trash)";
     else if (isPromo) classification = "JUNK / PROMOTIONAL (trash now)";
 
     Logger.log("[TEST " + (i + 1) + "] " + tc.subject + " | " + tc.from);
