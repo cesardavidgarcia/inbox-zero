@@ -164,7 +164,7 @@ function processNewEmails() {
     let scamEmails = [];
     let urgentEmails = [];
     let clientDraftsCreated = [];
-    const coldFlagMap = getColdFlagMap();
+    const newColdFlags = {};
 
     for (const thread of inboxThreads) {
       if (hasLabel(thread, CONFIG.LABEL_PROCESSED)) continue;
@@ -264,7 +264,7 @@ function processNewEmails() {
           applyLabel(thread, CONFIG.LABEL_COLD_EMAIL);
           markProcessed(thread);
           thread.moveToArchive();
-          coldFlagMap[thread.getId()] = Date.now();
+          newColdFlags[thread.getId()] = Date.now();
         }
         coldFlaggedCount++;
         processedCount++;
@@ -294,7 +294,11 @@ function processNewEmails() {
       processedCount++;
     }
 
-    if (!CONFIG.DRY_RUN) saveColdFlagMap(coldFlagMap);
+    if (!CONFIG.DRY_RUN && Object.keys(newColdFlags).length) {
+      updateColdFlagMap(function (map) {
+        for (const id in newColdFlags) map[id] = newColdFlags[id];
+      });
+    }
 
     if (scamEmails.length || urgentEmails.length || clientDraftsCreated.length ||
         promoTrashedCount || coldFlaggedCount) {
@@ -328,7 +332,13 @@ function purgeFlaggedColdEmails() {
     const cutoffMs = CONFIG.COLD_EMAIL_TRASH_AFTER_DAYS * 24 * 60 * 60 * 1000;
     const now = Date.now();
     const flagMap = getColdFlagMap();
-    const nextFlagMap = {};
+
+    // IDs to drop from the stored map (trashed or rescued), and flag dates to
+    // backfill for waiting threads that had no recorded date. These are
+    // applied via a locked read-modify-write so concurrent processNewEmails
+    // additions are not clobbered.
+    const removedIds = [];
+    const backfilledFlags = {};
 
     let trashedCount = 0;
     let rescuedCount = 0;
@@ -342,6 +352,7 @@ function purgeFlaggedColdEmails() {
         Logger.log("[RESCUE] engaged thread, unflagging: " +
           thread.getFirstMessageSubject());
         if (!CONFIG.DRY_RUN) thread.removeLabel(coldLabel);
+        removedIds.push(threadId);
         rescuedCount++;
         continue;
       }
@@ -354,7 +365,7 @@ function purgeFlaggedColdEmails() {
       const flaggedAt = flagMap[threadId] || now;
       if (now - flaggedAt < cutoffMs) {
         waitingCount++;
-        nextFlagMap[threadId] = flaggedAt;
+        if (!flagMap[threadId]) backfilledFlags[threadId] = flaggedAt;
         continue;
       }
 
@@ -363,10 +374,19 @@ function purgeFlaggedColdEmails() {
         thread.removeLabel(coldLabel);
         thread.moveToTrash();
       }
+      removedIds.push(threadId);
       trashedCount++;
     }
 
-    if (!CONFIG.DRY_RUN) saveColdFlagMap(nextFlagMap);
+    if (!CONFIG.DRY_RUN &&
+        (removedIds.length || Object.keys(backfilledFlags).length)) {
+      updateColdFlagMap(function (map) {
+        for (const id of removedIds) delete map[id];
+        for (const id in backfilledFlags) {
+          if (!map[id]) map[id] = backfilledFlags[id];
+        }
+      });
+    }
 
     Logger.log("=== COLD-EMAIL PURGE COMPLETE ===");
     Logger.log("Trashed: " + trashedCount + " | Rescued: " + rescuedCount +
@@ -540,6 +560,24 @@ function getColdFlagMap() {
 function saveColdFlagMap(map) {
   PropertiesService.getScriptProperties()
     .setProperty(COLD_PROP_FLAG_DATES, JSON.stringify(map));
+}
+
+/**
+ * Atomically read-modify-writes the cold-flag map under a script lock.
+ * processNewEmails and purgeFlaggedColdEmails are separate triggers whose
+ * executions can overlap; without the lock one run could read the map,
+ * then save a stale copy that drops entries the other run added in between.
+ */
+function updateColdFlagMap(mutator) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const map = getColdFlagMap();
+    mutator(map);
+    saveColdFlagMap(map);
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 // ===== HELPER FUNCTIONS =====
