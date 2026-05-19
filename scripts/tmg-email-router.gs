@@ -831,6 +831,7 @@ function testEmailClassification() {
     let classification = "UNKNOWN / REVIEW";
     if (isScam) classification = "SUSPECTED SCAM";
     else if (isUrgent) classification = "URGENT / WARNING";
+    else if (isClient && isCold) classification = "AMBIGUOUS (client + cold) -> _NeedsReview";
     else if (isClient) classification = "CLIENT DRAFT REPLY";
     else if (isCold) classification = "COLD OUTREACH (flag + auto-trash)";
     else if (isPromo) classification = "JUNK / PROMOTIONAL (trash now)";
