@@ -195,9 +195,9 @@ function processNewEmails() {
       const isClient = checkKeywords(text, CLIENT_KEYWORDS) &&
         !isAutomatedAddress(from);
       const isPromo = checkPromotional(subject, snippet, from);
-      // isCold is evaluated lazily in Path D below: isColdEmail() runs a
-      // GmailApp.search(), so it is only worth computing once the cheaper,
-      // higher-priority paths (scam, urgent, client) have been ruled out.
+      // Path C may call isColdEmail(..., true) for client-vs-cold ambiguity;
+      // Path D calls isColdEmail() without that flag. hasPriorRelationship()
+      // (GmailApp.search) runs only after cheaper isColdEmail checks pass.
 
       // Path A: Suspected scam. Flagged for caution, NOT marked important.
       if (isScam) {
@@ -231,7 +231,7 @@ function processNewEmails() {
         // carries cold-outreach signals it is ambiguous -- route it to
         // _NeedsReview for a human decision rather than drafting a reply
         // (could be a pitch) or auto-archiving it (could be a real guest).
-        if (isColdEmail(from, subject, snippet)) {
+        if (isColdEmail(from, subject, snippet, true)) {
           Logger.log("Classification: AMBIGUOUS (client + cold) -> _NeedsReview");
           if (!CONFIG.DRY_RUN) {
             applyLabel(thread, CONFIG.LABEL_NEEDS_REVIEW);
@@ -356,7 +356,10 @@ function purgeFlaggedColdEmails() {
       }
 
       Logger.log("[TRASH COLD] " + thread.getFirstMessageSubject());
-      if (!CONFIG.DRY_RUN) thread.moveToTrash();
+      if (!CONFIG.DRY_RUN) {
+        thread.removeLabel(coldLabel);
+        thread.moveToTrash();
+      }
       trashedCount++;
     }
 
@@ -620,10 +623,16 @@ function hasPriorRelationship(fromHeader) {
  * Detects unsolicited cold outreach: cold-pitch phrasing from an external
  * sender we have never emailed before. Trusted and personal-domain senders
  * are exempt, as is anyone we already correspond with.
+ *
+ * When ignorePersonalDomainWhitelist is true, the personal-domain exemption
+ * is skipped so Path C can still treat client-looking mail from Gmail etc.
+ * as ambiguous when it also matches cold-pitch keywords (Path D unchanged).
  */
-function isColdEmail(fromHeader, subject, snippet) {
+function isColdEmail(fromHeader, subject, snippet, ignorePersonalDomainWhitelist) {
   if (isTrustedSender(fromHeader)) return false;
-  if (checkPersonalDomainWhitelist(fromHeader)) return false;
+  if (!ignorePersonalDomainWhitelist && checkPersonalDomainWhitelist(fromHeader)) {
+    return false;
+  }
   if (!checkKeywords(subject + " " + snippet, COLD_EMAIL_KEYWORDS)) return false;
   return !hasPriorRelationship(fromHeader);
 }
@@ -830,11 +839,12 @@ function testEmailClassification() {
       !isAutomatedAddress(tc.from);
     const isPromo = checkPromotional(tc.subject, tc.snippet, tc.from);
     const isCold = isColdEmail(tc.from, tc.subject, tc.snippet);
+    const isColdAmbiguous = isColdEmail(tc.from, tc.subject, tc.snippet, true);
 
     let classification = "UNKNOWN / REVIEW";
     if (isScam) classification = "SUSPECTED SCAM";
     else if (isUrgent) classification = "URGENT / WARNING";
-    else if (isClient) classification = isCold
+    else if (isClient) classification = isColdAmbiguous
       ? "AMBIGUOUS (client + cold) -> _NeedsReview"
       : "CLIENT DRAFT REPLY";
     else if (isCold) classification = "COLD OUTREACH (flag + auto-trash)";
@@ -872,10 +882,13 @@ function installAutomatedTriggers() {
 
 function removeTriggers() {
   const triggers = ScriptApp.getProjectTriggers();
+  const managedHandlers = ["processNewEmails", "purgeFlaggedColdEmails"];
   for (const trigger of triggers) {
-    ScriptApp.deleteTrigger(trigger);
+    if (managedHandlers.indexOf(trigger.getHandlerFunction()) !== -1) {
+      ScriptApp.deleteTrigger(trigger);
+    }
   }
-  Logger.log("All time triggers deleted.");
+  Logger.log("Managed router triggers deleted (processNewEmails, purgeFlaggedColdEmails).");
 }
 
 // ===== ERROR HANDLING =====
