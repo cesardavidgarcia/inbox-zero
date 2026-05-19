@@ -153,6 +153,7 @@ function processNewEmails() {
       if (hasLabel(thread, CONFIG.LABEL_PROCESSED)) continue;
 
       const messages = thread.getMessages();
+      if (messages.length === 0) continue;
       const latestMsg = messages[messages.length - 1];
       const from = latestMsg.getFrom();
       const subject = latestMsg.getSubject() || "";
@@ -171,7 +172,11 @@ function processNewEmails() {
       const text = subject + " " + snippet;
       const isUrgent = checkKeywords(text, URGENT_KEYWORDS);
       const isScam = checkKeywords(text, SCAM_KEYWORDS) && (isUrgent || isExternalAutomated(from));
-      const isClient = checkKeywords(text, CLIENT_KEYWORDS);
+      // Automated mailboxes (incl. trusted-platform notifications such as
+      // "Reservation confirmed" from noreply@booking.com) are excluded from
+      // client classification so they never receive a spurious draft reply.
+      const isClient = checkKeywords(text, CLIENT_KEYWORDS) &&
+        !isAutomatedAddress(from);
       const isPromo = checkPromotional(subject, snippet, from);
       const isCold = isColdEmail(from, subject, snippet);
 
@@ -405,11 +410,21 @@ function reviewOldClutter() {
 
 // ===== HELPER FUNCTIONS =====
 
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Whole-word / whole-phrase keyword match. Uses word boundaries so short
+ * keywords (e.g. "irs", "court", "lien") do not match inside unrelated words
+ * such as "first", "courtyard", or "client".
+ */
 function checkKeywords(text, keywordList) {
   if (!text) return false;
   const lowerText = text.toLowerCase();
   for (const keyword of keywordList) {
-    if (lowerText.indexOf(keyword.toLowerCase()) !== -1) return true;
+    const pattern = new RegExp("\\b" + escapeRegex(keyword.toLowerCase()) + "\\b");
+    if (pattern.test(lowerText)) return true;
   }
   return false;
 }
@@ -438,16 +453,22 @@ function checkPersonalDomainWhitelist(fromHeader) {
   return PERSONAL_DOMAINS.indexOf(extractDomain(fromHeader)) !== -1;
 }
 
-/** True if the sender looks like an unattended/external automated mailbox. */
-function isExternalAutomated(fromHeader) {
-  if (isTrustedSender(fromHeader)) return false;
+/** True if the address looks like an unattended automated mailbox. */
+function isAutomatedAddress(fromHeader) {
   const fromLower = (fromHeader || "").toLowerCase();
-  const prefixes = ["noreply@", "no-reply@", "newsletter@", "marketing@",
-    "promo@", "offers@", "deals@", "alerts@"];
+  const prefixes = ["noreply@", "no-reply@", "donotreply@", "newsletter@",
+    "marketing@", "promo@", "offers@", "deals@", "alerts@",
+    "notifications@", "notification@", "mailer@"];
   for (const p of prefixes) {
     if (fromLower.indexOf(p) !== -1) return true;
   }
   return false;
+}
+
+/** True if the sender is an external (non-trusted) automated mailbox. */
+function isExternalAutomated(fromHeader) {
+  if (isTrustedSender(fromHeader)) return false;
+  return isAutomatedAddress(fromHeader);
 }
 
 /**
@@ -667,7 +688,8 @@ function testEmailClassification() {
     const text = tc.subject + " " + tc.snippet;
     const isUrgent = checkKeywords(text, URGENT_KEYWORDS);
     const isScam = checkKeywords(text, SCAM_KEYWORDS) && (isUrgent || isExternalAutomated(tc.from));
-    const isClient = checkKeywords(text, CLIENT_KEYWORDS);
+    const isClient = checkKeywords(text, CLIENT_KEYWORDS) &&
+      !isAutomatedAddress(tc.from);
     const isPromo = checkPromotional(tc.subject, tc.snippet, tc.from);
     const isCold = isColdEmail(tc.from, tc.subject, tc.snippet);
 
