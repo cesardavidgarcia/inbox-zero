@@ -55,6 +55,13 @@ const CONFIG = {
   PURGE_BATCH_LIMIT: 50
 };
 
+// Script-property keys tracking multi-page backlog-review progress so a large
+// cleanup can resume across several short, quota-safe runs.
+const CLUTTER_PROP_OFFSET = "CLUTTER_REVIEW_OFFSET";
+const CLUTTER_PROP_SCANNED = "CLUTTER_REVIEW_SCANNED";
+const CLUTTER_PROP_TRASHED = "CLUTTER_REVIEW_TRASHED";
+const CLUTTER_PROP_BYPASSED = "CLUTTER_REVIEW_BYPASSED";
+
 // Consumer email domains that can never be auto-classified as promotional.
 const PERSONAL_DOMAINS = [
   "gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "icloud.com",
@@ -336,20 +343,30 @@ function purgeFlaggedColdEmails() {
 /**
  * Manual review utility for historical clutter. With DRY_RUN=true it only
  * reports; with DRY_RUN=false it trashes promotional/social backlog.
+ *
+ * Large backlogs are handled automatically: when a run fills an entire page
+ * (PURGE_BATCH_LIMIT threads) it schedules a one-shot trigger to continue
+ * ~2 minutes later, walking the whole backlog without hitting Apps Script
+ * execution limits. Progress and running totals are kept in script
+ * properties; one summary email is sent when the final page is reached.
  */
 function reviewOldClutter() {
   Logger.log("=== HISTORICAL BACKLOG REVIEW RUNNING ===");
   Logger.log("DRY_RUN Mode: " + CONFIG.DRY_RUN);
 
   try {
+    removeClutterContinuationTriggers();
+    const props = PropertiesService.getScriptProperties();
+    const offset = parseInt(props.getProperty(CLUTTER_PROP_OFFSET) || "0", 10);
+
     // Narrowed: promotions/social only. category:updates is intentionally
     // excluded because it contains receipts, orders and confirmations.
     const searchQuery = "in:inbox older_than:" + CONFIG.PURGE_OLDER_THAN_DAYS +
       "d (category:promotions OR category:social OR unsubscribe)";
-    Logger.log("Search Query: " + searchQuery);
+    Logger.log("Search: " + searchQuery + " | offset: " + offset);
 
-    const threads = GmailApp.search(searchQuery, 0, CONFIG.PURGE_BATCH_LIMIT);
-    Logger.log("Found " + threads.length + " candidate threads.");
+    const threads = GmailApp.search(searchQuery, offset, CONFIG.PURGE_BATCH_LIMIT);
+    Logger.log("Found " + threads.length + " candidate threads on this page.");
 
     let scannedCount = 0;
     let trashedCount = 0;
@@ -388,24 +405,74 @@ function reviewOldClutter() {
       trashedCount++;
     }
 
-    Logger.log("=== REVIEW COMPLETE ===");
-    Logger.log("Scanned: " + scannedCount + " | Trashed: " + trashedCount +
-      " | Bypassed client/urgent: " + bypassedClientCount +
-      " | Bypassed trusted: " + bypassedTrustedCount);
+    const bypassedCount = bypassedClientCount + bypassedTrustedCount;
+    const totalScanned = addToProperty(props, CLUTTER_PROP_SCANNED, scannedCount);
+    const totalTrashed = addToProperty(props, CLUTTER_PROP_TRASHED, trashedCount);
+    const totalBypassed = addToProperty(props, CLUTTER_PROP_BYPASSED, bypassedCount);
 
+    Logger.log("Page done. Scanned: " + scannedCount + " | Trashed: " +
+      trashedCount + " | Bypassed: " + bypassedCount);
+
+    if (threads.length === CONFIG.PURGE_BATCH_LIMIT) {
+      // Trashed threads drop out of the search next run; bypassed ones do not,
+      // so the offset must skip past them. In DRY_RUN nothing is removed, so
+      // skip every thread scanned on this page instead.
+      const advanceBy = CONFIG.DRY_RUN ? scannedCount : bypassedCount;
+      props.setProperty(CLUTTER_PROP_OFFSET, String(offset + advanceBy));
+      setClutterContinuationTrigger();
+      Logger.log("Full page reached -- continuation scheduled in ~2 minutes.");
+      return;
+    }
+
+    // Final page reached: report grand totals and clear stored progress.
+    props.deleteProperty(CLUTTER_PROP_OFFSET);
+    props.deleteProperty(CLUTTER_PROP_SCANNED);
+    props.deleteProperty(CLUTTER_PROP_TRASHED);
+    props.deleteProperty(CLUTTER_PROP_BYPASSED);
+
+    Logger.log("=== REVIEW COMPLETE (all pages) ===");
     GmailApp.sendEmail(
       CONFIG.NOTIFY_EMAIL,
       "Historical Inbox Cleanup Report (DRY_RUN: " + CONFIG.DRY_RUN + ")",
-      "Backlog cleanup completed.\n\n" +
-      "- Scanned threads: " + scannedCount + "\n" +
-      "- Clutter trashed: " + trashedCount + "\n" +
-      "- Safeguarded client/urgent threads: " + bypassedClientCount + "\n" +
-      "- Safeguarded trusted/personal senders: " + bypassedTrustedCount + "\n\n" +
+      "Backlog cleanup completed across all pages.\n\n" +
+      "- Total threads scanned: " + totalScanned + "\n" +
+      "- Total clutter trashed: " + totalTrashed + "\n" +
+      "- Total safeguarded (client/urgent/trusted/personal): " + totalBypassed + "\n\n" +
       "Trashed mail remains recoverable from Gmail Trash for 30 days."
     );
   } catch (error) {
     handleScriptError("reviewOldClutter", error);
   }
+}
+
+/** Wrapper invoked by the one-shot backlog-review continuation trigger. */
+function reviewOldClutterMore() {
+  reviewOldClutter();
+}
+
+/** Schedules reviewOldClutter to continue ~2 minutes from now. */
+function setClutterContinuationTrigger() {
+  ScriptApp.newTrigger("reviewOldClutterMore")
+    .timeBased()
+    .at(new Date(Date.now() + 1000 * 60 * 2))
+    .create();
+}
+
+/** Removes any pending backlog-review continuation triggers. */
+function removeClutterContinuationTriggers() {
+  const triggers = ScriptApp.getProjectTriggers();
+  for (const trigger of triggers) {
+    if (trigger.getHandlerFunction() === "reviewOldClutterMore") {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  }
+}
+
+/** Adds delta to an integer script property and returns the new total. */
+function addToProperty(props, key, delta) {
+  const next = parseInt(props.getProperty(key) || "0", 10) + delta;
+  props.setProperty(key, String(next));
+  return next;
 }
 
 // ===== HELPER FUNCTIONS =====
