@@ -1,22 +1,28 @@
 /**
  * =============================================================================
- * PROJECT: TMG Secure Email Router & Backlog Cleanup (v6.0 - hardened)
- * PURPOSE: Triages Cesar's inbox with labels, prepares (but never sends) draft
- *          replies, and reviews historical clutter. Designed to FAIL SAFE:
- *          it never sends mail on its own and never deletes mail automatically.
+ * PROJECT: TMG Secure Email Router & Backlog Cleanup (v7.0)
+ * PURPOSE: Triages Cesar's inbox with labels, auto-trashes junk/promotional
+ *          mail, detects cold outreach and auto-trashes it after a grace
+ *          period, and prepares (but never sends) draft replies to guests.
  * DEPLOYMENT ACCOUNT: cesar@themarucagroup.com
  *
- * WHAT CHANGED FROM v5.0 (and why):
- *  - Removed the auto-send workflow. A draft is now sent only when YOU click
- *    Send in Gmail. A misplaced label can no longer dispatch a reply.
- *  - The automatic router NEVER trashes mail. Promotional mail is labelled and
- *    archived (still fully searchable, recoverable, and reversible).
- *  - Added scam detection. Money-demand + pressure language is flagged as
- *    _SuspectedScam and is NOT marked important, so scams are not elevated.
- *  - Trusted-sender allowlist protects booking platforms / known vendors from
- *    being mislabelled as promotional.
- *  - purgeOldClutter no longer sweeps category:updates (receipts, orders,
- *    confirmations) and still requires DRY_RUN=false to delete anything.
+ * BEHAVIOUR SUMMARY:
+ *  - Junk / promotional mail        -> trashed immediately (automatic).
+ *  - Cold outreach (unknown sender) -> labelled _ColdEmail, then trashed
+ *                                      automatically after COLD_EMAIL_TRASH_
+ *                                      AFTER_DAYS (default 10) days.
+ *  - Suspected scam                 -> labelled _SuspectedScam (kept, not
+ *                                      elevated).
+ *  - Urgent / warning               -> labelled _Urgent, marked important.
+ *  - Guest / client inquiry         -> draft reply prepared (NEVER auto-sent).
+ *  - Unclassified                   -> labelled _NeedsReview, kept in inbox.
+ *
+ * SAFETY NOTES:
+ *  - Client / urgent / scam mail and trusted senders are NEVER trashed.
+ *  - Cold mail sits under the _ColdEmail label for the grace period so you
+ *    can rescue anything mislabelled before it is trashed.
+ *  - Gmail keeps trashed mail recoverable for 30 days regardless.
+ *  - Draft replies are never sent automatically -- you review and send them.
  * =============================================================================
  */
 
@@ -28,8 +34,8 @@ const CONFIG = {
   CHECK_INTERVAL_MINUTES: 10,
   MAX_PROCESS_PER_RUN: 20,
 
-  // SAFETY SWITCH. Leave true until you have reviewed several real summaries.
-  // Even when false, this script never sends mail and never auto-trashes.
+  // SAFETY SWITCH. While true, the script only logs what it WOULD do.
+  // Set to false to let it trash junk and process cold mail for real.
   DRY_RUN: true,
 
   // Gmail label workflow
@@ -37,8 +43,12 @@ const CONFIG = {
   LABEL_URGENT: "_Urgent",
   LABEL_SUSPECTED_SCAM: "_SuspectedScam",
   LABEL_DRAFT_PENDING: "_DraftPending",
-  LABEL_PROMOTIONAL: "_Promotional",
+  LABEL_COLD_EMAIL: "_ColdEmail",
   LABEL_NEEDS_REVIEW: "_NeedsReview",
+
+  // Cold-email grace period: flagged cold mail is auto-trashed after this many
+  // days. Until then it lives under the _ColdEmail label so you can rescue it.
+  COLD_EMAIL_TRASH_AFTER_DAYS: 10,
 
   // Historical backlog review limits
   PURGE_OLDER_THAN_DAYS: 30,
@@ -53,8 +63,8 @@ const PERSONAL_DOMAINS = [
 ];
 
 // Known business senders (booking platforms, vendors, partners). Mail from
-// these domains is never labelled promotional and never archived/purged.
-// Add the real domains you transact with.
+// these domains is never trashed, labelled promotional, or flagged cold.
+// EDIT THIS to match the real domains TMG actually transacts with.
 const TRUSTED_DOMAINS = [
   "themarucagroup.com",
   "booking.com", "airbnb.com", "vrbo.com", "expedia.com", "hometogo.com",
@@ -62,16 +72,29 @@ const TRUSTED_DOMAINS = [
   "chase.com", "bankofamerica.com"
 ];
 
-// Marketing / newsletter / cold-outreach language.
+// Marketing / newsletter language.
 const PROMO_KEYWORDS = [
   "unsubscribe", "opt-out", "opt out", "newsletter", "promotion",
   "limited time", "act now", "buy now", "free trial", "advertisement",
   "sponsored", "no longer wish", "mailing list", "bulk mail", "mass email",
-  "click here to", "special offer", "shop now", "need more leads",
-  "manage your social", "raising capital", "are you the owner",
-  "boost your bookings", "sell your business", "brand partnership",
-  "we found you on instagram", "commercial cleaning", "jobs board",
-  "creator deck", "loyalty offer", "merchant survey"
+  "click here to", "special offer", "shop now", "discount", "coupon",
+  "sale ends", "loyalty offer", "merchant survey", "creator deck"
+];
+
+// Cold-outreach phrasing (unsolicited sales / partnership pitches).
+const COLD_EMAIL_KEYWORDS = [
+  "quick question", "saw your website", "came across your",
+  "found your website", "found you on instagram", "i help businesses",
+  "we help businesses", "i help companies", "we help companies",
+  "boost your revenue", "boost your bookings", "would love to connect",
+  "hop on a call", "15-minute call", "15 minute call", "schedule a call",
+  "book a call", "are you the owner", "generate more leads",
+  "need more leads", "grow your business", "i noticed your",
+  "partnership opportunity", "brand partnership", "wanted to reach out",
+  "i'm reaching out", "i am reaching out", "reaching out because",
+  "following up on my last", "circling back", "circle back",
+  "we specialize in", "drive more traffic", "manage your social",
+  "raising capital", "sell your business", "commercial cleaning"
 ];
 
 // Legal / financial / service-disruption warnings (genuine or not).
@@ -87,9 +110,9 @@ const URGENT_KEYWORDS = [
 const SCAM_KEYWORDS = [
   "wire transfer", "wire the", "send payment", "pay now to avoid",
   "payment immediately", "complete payment", "bitcoin", "crypto",
-  "gift card", "western union", "moneygram", "avoid legal action",
-  "account will be closed", "verify your account", "confirm your password",
-  "gift cards", "purchase gift", "final notice", "you must pay"
+  "gift card", "gift cards", "purchase gift", "western union", "moneygram",
+  "avoid legal action", "account will be closed", "verify your account",
+  "confirm your password", "final notice", "you must pay"
 ];
 
 // Guest / reservation inquiry language.
@@ -106,11 +129,12 @@ const CLIENT_KEYWORDS = [
 // ===== MAIN FUNCTIONS =====
 
 /**
- * Triggered: scans the inbox and routes each new thread by label only.
- * Never sends mail. Never trashes mail.
+ * Triggered: scans the inbox and routes each new thread.
+ * Trashes junk/promotional mail automatically. Flags cold mail.
+ * Never sends mail automatically.
  */
 function processNewEmails() {
-  Logger.log("=== TMG EMAIL ROUTER RUNNING (v6.0) ===");
+  Logger.log("=== TMG EMAIL ROUTER RUNNING (v7.0) ===");
   Logger.log("DRY_RUN Mode: " + CONFIG.DRY_RUN);
 
   try {
@@ -119,7 +143,8 @@ function processNewEmails() {
     Logger.log("Retrieved " + inboxThreads.length + " threads from inbox.");
 
     let processedCount = 0;
-    let promoArchivedCount = 0;
+    let promoTrashedCount = 0;
+    let coldFlaggedCount = 0;
     let scamEmails = [];
     let urgentEmails = [];
     let clientDraftsCreated = [];
@@ -148,6 +173,7 @@ function processNewEmails() {
       const isScam = checkKeywords(text, SCAM_KEYWORDS) && (isUrgent || isExternalAutomated(from));
       const isClient = checkKeywords(text, CLIENT_KEYWORDS);
       const isPromo = checkPromotional(subject, snippet, from);
+      const isCold = isColdEmail(from, subject, snippet);
 
       // Path A: Suspected scam. Flagged for caution, NOT marked important.
       if (isScam) {
@@ -174,8 +200,7 @@ function processNewEmails() {
         continue;
       }
 
-      // Path C: Client / guest inquiry. A DRAFT is prepared. It is never sent
-      // automatically -- review and send it yourself in Gmail.
+      // Path C: Client / guest inquiry. A DRAFT is prepared, never sent.
       if (isClient) {
         Logger.log("Classification: CLIENT INQUIRY -> draft prepared (not sent)");
         const draftReplyText = generateProfessionalDraft(from, subject, snippet);
@@ -189,21 +214,33 @@ function processNewEmails() {
         continue;
       }
 
-      // Path D: Promotional. Labelled and archived out of the inbox.
-      // NOT trashed -- still searchable and reversible.
-      if (isPromo) {
-        Logger.log("Classification: PROMOTIONAL -> labelled + archived");
+      // Path D: Cold outreach from an unknown sender. Flagged + archived now;
+      // auto-trashed later by purgeFlaggedColdEmails after the grace period.
+      if (isCold) {
+        Logger.log("Classification: COLD OUTREACH -> flagged _ColdEmail (trash in " +
+          CONFIG.COLD_EMAIL_TRASH_AFTER_DAYS + "d)");
         if (!CONFIG.DRY_RUN) {
-          applyLabel(thread, CONFIG.LABEL_PROMOTIONAL);
+          applyLabel(thread, CONFIG.LABEL_COLD_EMAIL);
           markProcessed(thread);
           thread.moveToArchive();
         }
-        promoArchivedCount++;
+        coldFlaggedCount++;
         processedCount++;
         continue;
       }
 
-      // Path E: Unclassified. Flagged for human review, kept in inbox.
+      // Path E: Junk / promotional. Trashed immediately (automatic).
+      if (isPromo) {
+        Logger.log("Classification: JUNK / PROMOTIONAL -> trashed");
+        if (!CONFIG.DRY_RUN) {
+          thread.moveToTrash();
+        }
+        promoTrashedCount++;
+        processedCount++;
+        continue;
+      }
+
+      // Path F: Unclassified. Flagged for human review, kept in inbox.
       Logger.log("Classification: UNKNOWN -> flagged for review");
       if (!CONFIG.DRY_RUN) {
         applyLabel(thread, CONFIG.LABEL_NEEDS_REVIEW);
@@ -212,8 +249,10 @@ function processNewEmails() {
       processedCount++;
     }
 
-    if (scamEmails.length || urgentEmails.length || clientDraftsCreated.length || promoArchivedCount) {
-      sendRouterNotificationSummary(scamEmails, urgentEmails, clientDraftsCreated, promoArchivedCount);
+    if (scamEmails.length || urgentEmails.length || clientDraftsCreated.length ||
+        promoTrashedCount || coldFlaggedCount) {
+      sendRouterNotificationSummary(scamEmails, urgentEmails, clientDraftsCreated,
+        promoTrashedCount, coldFlaggedCount);
     }
 
     Logger.log("=== ROUTER CYCLE COMPLETE | Processed: " + processedCount + " ===");
@@ -223,13 +262,79 @@ function processNewEmails() {
 }
 
 /**
- * Manual review utility: lists historical clutter for inspection.
- * With DRY_RUN=true (default) it only reports. With DRY_RUN=false it archives
- * (does NOT trash) clutter so the action stays fully reversible.
+ * Triggered (daily): trashes cold-flagged mail once it is past the grace
+ * period. A thread is rescued (and unflagged) if you replied to it or moved
+ * it back to the inbox in the meantime.
+ */
+function purgeFlaggedColdEmails() {
+  Logger.log("=== COLD-EMAIL AUTO-PURGE RUNNING ===");
+  Logger.log("DRY_RUN Mode: " + CONFIG.DRY_RUN);
+
+  try {
+    const coldLabel = GmailApp.getUserLabelByName(CONFIG.LABEL_COLD_EMAIL);
+    if (!coldLabel) {
+      Logger.log("No _ColdEmail label found; nothing to purge.");
+      return;
+    }
+
+    const threads = coldLabel.getThreads();
+    const cutoffMs = CONFIG.COLD_EMAIL_TRASH_AFTER_DAYS * 24 * 60 * 60 * 1000;
+    const now = Date.now();
+
+    let trashedCount = 0;
+    let rescuedCount = 0;
+    let waitingCount = 0;
+
+    for (const thread of threads) {
+      const ageMs = now - thread.getLastMessageDate().getTime();
+
+      // Rescue: you engaged with it (replied) or moved it back to the inbox.
+      if (threadHasReplyFromBoss(thread) || thread.isInInbox()) {
+        Logger.log("[RESCUE] engaged thread, unflagging: " +
+          thread.getFirstMessageSubject());
+        if (!CONFIG.DRY_RUN) thread.removeLabel(coldLabel);
+        rescuedCount++;
+        continue;
+      }
+
+      if (ageMs < cutoffMs) {
+        waitingCount++;
+        continue;
+      }
+
+      Logger.log("[TRASH COLD] " + thread.getFirstMessageSubject());
+      if (!CONFIG.DRY_RUN) thread.moveToTrash();
+      trashedCount++;
+    }
+
+    Logger.log("=== COLD-EMAIL PURGE COMPLETE ===");
+    Logger.log("Trashed: " + trashedCount + " | Rescued: " + rescuedCount +
+      " | Still within grace period: " + waitingCount);
+
+    if (trashedCount > 0 || rescuedCount > 0) {
+      GmailApp.sendEmail(
+        CONFIG.NOTIFY_EMAIL,
+        "Cold-Email Auto-Purge Report (DRY_RUN: " + CONFIG.DRY_RUN + ")",
+        "Cold-email auto-purge completed.\n\n" +
+        "- Cold emails trashed (past " + CONFIG.COLD_EMAIL_TRASH_AFTER_DAYS +
+        "-day grace period): " + trashedCount + "\n" +
+        "- Rescued (you replied or moved back to inbox): " + rescuedCount + "\n" +
+        "- Still within grace period: " + waitingCount + "\n\n" +
+        "Trashed mail remains recoverable from Gmail Trash for 30 days."
+      );
+    }
+  } catch (error) {
+    handleScriptError("purgeFlaggedColdEmails", error);
+  }
+}
+
+/**
+ * Manual review utility for historical clutter. With DRY_RUN=true it only
+ * reports; with DRY_RUN=false it trashes promotional/social backlog.
  */
 function reviewOldClutter() {
   Logger.log("=== HISTORICAL BACKLOG REVIEW RUNNING ===");
-  Logger.log("DRY_RUN Safety Lock: " + CONFIG.DRY_RUN);
+  Logger.log("DRY_RUN Mode: " + CONFIG.DRY_RUN);
 
   try {
     // Narrowed: promotions/social only. category:updates is intentionally
@@ -242,7 +347,7 @@ function reviewOldClutter() {
     Logger.log("Found " + threads.length + " candidate threads.");
 
     let scannedCount = 0;
-    let archivedCount = 0;
+    let trashedCount = 0;
     let bypassedClientCount = 0;
     let bypassedTrustedCount = 0;
 
@@ -271,28 +376,27 @@ function reviewOldClutter() {
         continue;
       }
 
-      Logger.log("[CLUTTER] " + subject + " | From: " + from);
+      Logger.log("[TRASH CLUTTER] " + subject + " | From: " + from);
       if (!CONFIG.DRY_RUN) {
-        thread.moveToArchive();
+        thread.moveToTrash();
       }
-      archivedCount++;
+      trashedCount++;
     }
 
     Logger.log("=== REVIEW COMPLETE ===");
-    Logger.log("Scanned: " + scannedCount + " | Archived: " + archivedCount +
+    Logger.log("Scanned: " + scannedCount + " | Trashed: " + trashedCount +
       " | Bypassed client/urgent: " + bypassedClientCount +
       " | Bypassed trusted: " + bypassedTrustedCount);
 
     GmailApp.sendEmail(
       CONFIG.NOTIFY_EMAIL,
-      "Historical Inbox Review Report (DRY_RUN: " + CONFIG.DRY_RUN + ")",
-      "Backlog review completed.\n\n" +
+      "Historical Inbox Cleanup Report (DRY_RUN: " + CONFIG.DRY_RUN + ")",
+      "Backlog cleanup completed.\n\n" +
       "- Scanned threads: " + scannedCount + "\n" +
-      "- Clutter archived: " + archivedCount + "\n" +
+      "- Clutter trashed: " + trashedCount + "\n" +
       "- Safeguarded client/urgent threads: " + bypassedClientCount + "\n" +
       "- Safeguarded trusted/personal senders: " + bypassedTrustedCount + "\n\n" +
-      "Note: this routine archives clutter, it never deletes it. Archived mail " +
-      "is still searchable and can be moved back to the inbox at any time."
+      "Trashed mail remains recoverable from Gmail Trash for 30 days."
     );
   } catch (error) {
     handleScriptError("reviewOldClutter", error);
@@ -313,6 +417,13 @@ function checkKeywords(text, keywordList) {
 function extractDomain(fromHeader) {
   const m = (fromHeader || "").toLowerCase().match(/@([a-z0-9._-]+)/);
   return m ? m[1] : "";
+}
+
+function extractEmail(fromHeader) {
+  const m = (fromHeader || "").match(/<([^>]+)>/);
+  if (m) return m[1].toLowerCase().trim();
+  const bare = (fromHeader || "").match(/[a-z0-9._%+-]+@[a-z0-9._-]+/i);
+  return bare ? bare[0].toLowerCase() : "";
 }
 
 function isTrustedSender(fromHeader) {
@@ -340,8 +451,35 @@ function isExternalAutomated(fromHeader) {
 }
 
 /**
- * Conservative promotional classifier. Trusted senders are never promotional.
+ * True if we have any prior outbound correspondence with this sender, i.e.
+ * the account has previously sent mail to that address. Used to tell genuine
+ * contacts apart from cold (first-contact) senders.
  */
+function hasPriorRelationship(fromHeader) {
+  const email = extractEmail(fromHeader);
+  if (!email) return false;
+  if (email === CONFIG.BOSS_EMAIL) return true;
+  try {
+    return GmailApp.search('in:sent to:' + email, 0, 1).length > 0;
+  } catch (e) {
+    Logger.log("[WARN] prior-relationship lookup failed: " + e.message);
+    return false;
+  }
+}
+
+/**
+ * Detects unsolicited cold outreach: cold-pitch phrasing from an external
+ * sender we have never emailed before. Trusted and personal-domain senders
+ * are exempt, as is anyone we already correspond with.
+ */
+function isColdEmail(fromHeader, subject, snippet) {
+  if (isTrustedSender(fromHeader)) return false;
+  if (checkPersonalDomainWhitelist(fromHeader)) return false;
+  if (!checkKeywords(subject + " " + snippet, COLD_EMAIL_KEYWORDS)) return false;
+  return !hasPriorRelationship(fromHeader);
+}
+
+/** Conservative promotional classifier. Trusted senders are never promotional. */
 function checkPromotional(subject, snippet, from) {
   if (isTrustedSender(from)) return false;
 
@@ -355,12 +493,9 @@ function checkPromotional(subject, snippet, from) {
 
   const automated = isExternalAutomated(from);
 
-  // A personal-domain sender is only promotional with strong, explicit signal.
   if (isPersonalDomain) {
     return promoScore >= 3 && automated;
   }
-  // Otherwise require either clear keyword evidence, or an automated address
-  // that also shows at least one promo signal (automated alone is not enough).
   return promoScore >= 2 || (automated && promoScore >= 1);
 }
 
@@ -422,13 +557,22 @@ function markProcessed(thread) {
   applyLabel(thread, CONFIG.LABEL_PROCESSED);
 }
 
+/** True if the account owner has sent at least one message in this thread. */
+function threadHasReplyFromBoss(thread) {
+  const messages = thread.getMessages();
+  for (const msg of messages) {
+    if (extractEmail(msg.getFrom()) === CONFIG.BOSS_EMAIL) return true;
+  }
+  return false;
+}
+
 function ensureLabelsExist() {
   const requiredLabels = [
     CONFIG.LABEL_PROCESSED,
     CONFIG.LABEL_URGENT,
     CONFIG.LABEL_SUSPECTED_SCAM,
     CONFIG.LABEL_DRAFT_PENDING,
-    CONFIG.LABEL_PROMOTIONAL,
+    CONFIG.LABEL_COLD_EMAIL,
     CONFIG.LABEL_NEEDS_REVIEW
   ];
   for (const name of requiredLabels) {
@@ -439,16 +583,23 @@ function ensureLabelsExist() {
   }
 }
 
-function sendRouterNotificationSummary(scamList, urgentList, clientDraftList, promoArchivedCount) {
+function sendRouterNotificationSummary(scamList, urgentList, clientDraftList,
+                                       promoTrashedCount, coldFlaggedCount) {
   let subject = "TMG Email Manager Summary Report";
   let body = "=== TMG EMAIL ROUTER SUMMARY ===\n";
   body += "Time: " + new Date().toLocaleString() + "\n";
   body += "DRY RUN MODE: " + CONFIG.DRY_RUN + "\n\n";
 
-  if (promoArchivedCount > 0) {
-    body += "Promotional mail labelled + archived: " + promoArchivedCount +
-      " threads (still searchable, not deleted)\n\n";
+  if (promoTrashedCount > 0) {
+    body += "Junk / promotional mail trashed automatically: " +
+      promoTrashedCount + " threads\n";
   }
+  if (coldFlaggedCount > 0) {
+    body += "Cold outreach flagged (_ColdEmail, auto-trash in " +
+      CONFIG.COLD_EMAIL_TRASH_AFTER_DAYS + " days): " + coldFlaggedCount +
+      " threads\n";
+  }
+  if (promoTrashedCount > 0 || coldFlaggedCount > 0) body += "\n";
 
   if (scamList.length > 0) {
     subject = "ATTENTION: " + scamList.length + " suspected scam email(s) flagged";
@@ -502,11 +653,11 @@ function testEmailClassification() {
   Logger.log("=== EMAIL CLASSIFICATION TEST ===");
 
   const testCases = [
-    { from: "marketing@digipeak.net", subject: "Increase bookings, gain more high-quality leads today!", snippet: "Hi owner, our agency specializes in social media strategy. Unsubscribe here." },
-    { from: "johndoe@gmail.com", subject: "Refund Request", snippet: "Hi Cesar, I stayed in your villa and there was no hot water. I would like a refund for my booking." },
-    { from: "pre-legalescalation@booking-support-billing.com", subject: "WARNING: Avoid listing suspension", snippet: "Outstanding invoice past overdue. Complete wire transfer immediately to avoid legal action." },
+    { from: "marketing@digipeak.net", subject: "Increase bookings, gain leads today!", snippet: "Hi owner, our agency specializes in social media. Unsubscribe here. Special offer." },
+    { from: "johndoe@gmail.com", subject: "Refund Request", snippet: "Hi Cesar, I stayed in your villa and there was no hot water. I would like a refund." },
+    { from: "pre-legal@booking-support-billing.com", subject: "WARNING: Avoid listing suspension", snippet: "Outstanding invoice past overdue. Complete wire transfer immediately to avoid legal action." },
     { from: "guest@icloud.com", subject: "Question regarding pool keys", snippet: "Hello, we are checking in tomorrow and wanted to know where the lockbox for the key is." },
-    { from: "newsletter@facebookmail.com", subject: "Notification: Social media updates", snippet: "You have 5 new notifications. Unsubscribe here." },
+    { from: "alex@growthagency.io", subject: "Quick question for The Maruca Group", snippet: "Hi, I came across your website and wanted to reach out. We help businesses generate more leads. Can we hop on a call?" },
     { from: "noreply@booking.com", subject: "Reservation confirmed", snippet: "A new reservation has been confirmed for your villa." },
     { from: "irs-gov-notice@irs.gov", subject: "IRS Audit Notice - Tax Permit Compliance Required", snippet: "Notice of compliance deficiency regarding state tax and permits." }
   ];
@@ -518,12 +669,14 @@ function testEmailClassification() {
     const isScam = checkKeywords(text, SCAM_KEYWORDS) && (isUrgent || isExternalAutomated(tc.from));
     const isClient = checkKeywords(text, CLIENT_KEYWORDS);
     const isPromo = checkPromotional(tc.subject, tc.snippet, tc.from);
+    const isCold = isColdEmail(tc.from, tc.subject, tc.snippet);
 
     let classification = "UNKNOWN / REVIEW";
     if (isScam) classification = "SUSPECTED SCAM";
     else if (isUrgent) classification = "URGENT / WARNING";
     else if (isClient) classification = "CLIENT DRAFT REPLY";
-    else if (isPromo) classification = "PROMOTIONAL (archive)";
+    else if (isCold) classification = "COLD OUTREACH (flag + auto-trash)";
+    else if (isPromo) classification = "JUNK / PROMOTIONAL (trash now)";
 
     Logger.log("[TEST " + (i + 1) + "] " + tc.subject + " | " + tc.from);
     Logger.log("         ===> " + classification);
@@ -532,15 +685,27 @@ function testEmailClassification() {
   Logger.log("=== TEST COMPLETED ===");
 }
 
-/** Installs the inbox-scan trigger. There is no auto-send trigger by design. */
+/**
+ * Installs the time triggers:
+ *  - processNewEmails       : every CHECK_INTERVAL_MINUTES
+ *  - purgeFlaggedColdEmails : once per day
+ * There is intentionally no auto-send trigger.
+ */
 function installAutomatedTriggers() {
   removeTriggers();
+
   ScriptApp.newTrigger("processNewEmails")
     .timeBased()
     .everyMinutes(CONFIG.CHECK_INTERVAL_MINUTES)
     .create();
-  Logger.log("Trigger installed: processNewEmails every " +
-    CONFIG.CHECK_INTERVAL_MINUTES + " minutes. No auto-send trigger exists.");
+
+  ScriptApp.newTrigger("purgeFlaggedColdEmails")
+    .timeBased()
+    .everyDays(1)
+    .create();
+
+  Logger.log("Triggers installed: processNewEmails every " +
+    CONFIG.CHECK_INTERVAL_MINUTES + " minutes; purgeFlaggedColdEmails daily.");
 }
 
 function removeTriggers() {
