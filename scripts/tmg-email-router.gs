@@ -741,7 +741,12 @@ function sendRouterNotificationSummary(scamList, urgentList, clientDraftList,
 
 // ===== DIAGNOSTICS & TRIGGERS =====
 
-/** Evaluates mock inputs against the classifier without touching Gmail. */
+/**
+ * Evaluates mock inputs against the classifier and logs each result.
+ * Note: the cold-outreach check calls hasPriorRelationship(), which runs one
+ * GmailApp.search() over Sent mail -- so the cold-email verdict for a test
+ * case reflects the live account's actual correspondence history.
+ */
 function testEmailClassification() {
   Logger.log("=== EMAIL CLASSIFICATION TEST ===");
 
