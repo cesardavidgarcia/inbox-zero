@@ -1,0 +1,412 @@
+================================================================================
+TMG EMAIL AUTOMATION — COMPLETE IMPLEMENTATION PLAN
+For: Cesar David Garcia / The Maruca Group
+Prepared by: Warda (Digital Baji)
+Date: May 21, 2026
+================================================================================
+
+
+WHAT THIS SYSTEM DOES
+----------------------
+Every 10 minutes, the script wakes up, looks at the inbox, reads each new
+email, decides what type it is, and takes the correct action.
+
+It never sends anything automatically.
+It never permanently deletes anything.
+A human always makes the final call on replies and deletions.
+
+
+================================================================================
+THE 6 EMAIL TYPES AND WHAT HAPPENS TO EACH
+================================================================================
+
+TYPE 1 — TRUSTED AUTOMATED
+  What it is:  Booking confirmation from Booking.com, Airbnb, Stripe receipt
+  Action:      Label _Processed. Leave in inbox. No action needed.
+
+TYPE 2 — SUSPECTED SCAM
+  What it is:  Wire transfer demands, gift card requests, fake legal threats
+  Action:      Label _SuspectedScam. Mark NOT important. Keep for human review.
+               NEVER trash.
+
+TYPE 3 — URGENT / WARNING
+  What it is:  Real legal notices, IRS, permit issues, chargebacks
+  Action:      Label _Urgent. Mark as IMPORTANT. Keep in inbox.
+
+TYPE 4 — GUEST / CLIENT
+  What it is:  Refund, complaint, booking question, damage, check-in issue
+  Action:      Prepare a DRAFT reply (never send it). Label _DraftPending.
+
+TYPE 5 — COLD OUTREACH
+  What it is:  Unsolicited sales pitch, "I help businesses", "hop on a call"
+  Action:      Label _ColdEmail. Move to archive.
+               Auto-trash after 10 days if ignored.
+
+TYPE 6 — JUNK / PROMOTIONAL
+  What it is:  Newsletters, unsubscribe links, marketing blasts
+  Action:      Trash immediately (automatic).
+
+TYPE 7 — UNCLASSIFIED
+  What it is:  Anything that does not fit the above
+  Action:      Label _NeedsReview. Keep in inbox. Send notification to Cesar.
+
+
+================================================================================
+DECISION FLOW — STEP BY STEP
+================================================================================
+
+The script reads each email and asks these questions IN THIS EXACT ORDER.
+The first match wins. It does not continue checking after a match.
+
+QUESTION 1:
+  Is it from a trusted platform (Booking.com, Airbnb, Stripe, etc.)?
+  AND is the sender a noreply / automated address?
+    YES -> Label _Processed. Leave in inbox. STOP.
+
+QUESTION 2:
+  Does it contain scam language (wire transfer, gift card, bitcoin)?
+  AND is it also urgent OR from an external automated address?
+    YES -> Label _SuspectedScam. STOP.
+
+QUESTION 3:
+  Does it contain urgent language (lawsuit, IRS, chargeback, suspended)?
+  (and it is NOT a scam)
+    YES -> Label _Urgent. Mark Important. STOP.
+
+QUESTION 4:
+  Does it contain guest/client language (refund, complaint, check-in, etc.)?
+  AND is the sender NOT a noreply/automated address?
+    YES -> Does it ALSO contain cold-outreach language from an unknown sender?
+             YES -> Ambiguous. Label _NeedsReview. STOP.
+             NO  -> Create draft reply. Label _DraftPending. STOP.
+
+QUESTION 5:
+  Does it contain cold-outreach language (saw your website, hop on a call)?
+  AND have we NEVER emailed this person before?
+  AND they are NOT a trusted or personal domain sender?
+    YES -> Label _ColdEmail. Archive. Schedule for trash in 10 days. STOP.
+
+QUESTION 6:
+  Does it contain promotional/newsletter language (unsubscribe, special offer)?
+  AND they are NOT a trusted sender?
+    YES -> Trash immediately. STOP.
+
+QUESTION 7:
+  Nothing matched above?
+    -> Label _NeedsReview. Send notification to Cesar. STOP.
+
+
+================================================================================
+KEYWORD LISTS
+================================================================================
+
+--- TRUSTED DOMAINS (never trash, never flag, never draft) ---
+themarucagroup.com
+booking.com
+airbnb.com
+vrbo.com
+expedia.com
+hometogo.com
+stripe.com
+paypal.com
+venmo.com
+intuit.com
+quickbooks.com
+wellsfargo.com
+chase.com
+bankofamerica.com
+gohighlevel.com
+msgsndr.com
+google.com
+googlemail.com
+n8n.io
+n8n.cloud
+anthropic.com
+openai.com
+timedoctor.com
+wavespeed.ai
+upload-post.com
+
+--- PERSONAL DOMAINS (never auto-classified as promotional) ---
+gmail.com, yahoo.com, hotmail.com, outlook.com, icloud.com,
+aol.com, live.com, msn.com, protonmail.com, mail.com,
+zoho.com, gmx.com, ymail.com
+
+--- AUTOMATED ADDRESS PREFIXES (never get draft replies) ---
+noreply@, no-reply@, donotreply@, newsletter@, marketing@,
+promo@, offers@, deals@, alerts@, notifications@,
+notification@, mailer@
+
+--- SCAM KEYWORDS (triggers _SuspectedScam label) ---
+wire transfer, wire the, send payment, pay now to avoid,
+payment immediately, complete payment, bitcoin, crypto,
+gift card, gift cards, purchase gift, western union, moneygram,
+avoid legal action, account will be closed, verify your account,
+confirm your password, final notice, you must pay
+
+--- URGENT KEYWORDS (triggers _Urgent label + mark Important) ---
+urgent, critical, emergency, pre-legal, legal action, lawsuit,
+court, attorney, irs, license, permit, iata, compliance,
+lien, judgment, chargeback, suspension, suspended, overdue,
+outstanding balance, insurance claim, bank notice
+
+--- GUEST / CLIENT KEYWORDS (triggers draft reply) ---
+refund, complaint, cancel, receipt, invoice, damage, broken,
+not satisfied, disappointed, overcharge, cleaning, noise, key,
+lockbox, wifi, pool, air condition, hot water, towel, amenities,
+early check, late check, extend stay, modify booking,
+compensation, upgrade, reservation, check-in, checkout,
+my booking, my stay, villa, confirmation, new reservation,
+booking confirmed, reservation confirmed
+
+--- COLD OUTREACH KEYWORDS (triggers _ColdEmail label) ---
+quick question, saw your website, came across your,
+found your website, found you on instagram, i help businesses,
+we help businesses, i help companies, we help companies,
+boost your revenue, boost your bookings, would love to connect,
+hop on a call, 15-minute call, schedule a call, book a call,
+are you the owner, generate more leads, need more leads,
+grow your business, i noticed your, partnership opportunity,
+brand partnership, wanted to reach out, i'm reaching out,
+i am reaching out, reaching out because, following up on my last,
+circling back, circle back, we specialize in, drive more traffic,
+manage your social, commercial cleaning
+
+--- PROMOTIONAL KEYWORDS (triggers immediate trash) ---
+unsubscribe, opt-out, opt out, newsletter, promotion,
+limited time, act now, buy now, free trial, advertisement,
+sponsored, no longer wish, mailing list, bulk mail,
+mass email, click here to, special offer, shop now,
+discount, coupon, sale ends, loyalty offer,
+merchant survey, creator deck
+
+
+================================================================================
+DRAFT REPLY TEMPLATES
+================================================================================
+
+The script detects which type of guest issue it is and uses the matching
+template. The draft is saved in Gmail Drafts but NEVER sent automatically.
+Cesar reviews and sends manually.
+
+All drafts end with:
+  Best regards,
+  Cesar
+  The Maruca Group
+  [DRAFT prepared automatically -- review and edit before sending.]
+
+--- REFUND REQUEST ---
+Dear [Name],
+Thank you for reaching out regarding your refund request. I have received
+your message and our team will review the details of your booking. I will
+follow up with you personally once that review is complete.
+
+--- CANCELLATION ---
+Dear [Name],
+Thank you for letting us know about the cancellation of your reservation.
+Our reservations team will review your booking and the applicable policy,
+and I will follow up with the next steps shortly.
+
+--- CHARGE / INVOICE QUESTION ---
+Dear [Name],
+Thank you for contacting us about the charge on your account. I will review
+the invoice and payment history for your booking and follow up with you so
+we can resolve any questions together.
+
+--- DAMAGE / BROKEN ITEM ---
+Dear [Name],
+Thank you for informing us about the issue at the property. I have flagged
+this for our maintenance team and will follow up with you directly to
+coordinate a resolution.
+
+--- KEY / LOCKBOX / CHECK-IN / CHECKOUT ---
+Dear [Name],
+Thank you for reaching out about your arrival details. Our team will confirm
+the access instructions for your stay and follow up with you shortly.
+
+--- WIFI / POOL / HOT WATER / AMENITIES ---
+Dear [Name],
+Thank you for contacting us about an issue during your stay. I am escalating
+this to our property team right away and will follow up with you as soon as
+I have an update.
+
+--- ALL OTHER GUEST ISSUES (default) ---
+Dear [Name],
+Thank you for your message regarding your reservation. I have received your
+inquiry and will coordinate with our reservations team to get back to you
+with a full response shortly.
+
+
+================================================================================
+CONFIGURATION SETTINGS
+================================================================================
+
+Run every:                10 minutes
+Max emails per run:       20
+Cold email grace period:  10 days (auto-trash after this if ignored)
+Backlog cleanup age:      180 days (first run only), then 30 days ongoing
+Notification email:       reservations@themarucagroup.com
+DRY_RUN default:          TRUE (must be manually switched to FALSE after testing)
+
+
+================================================================================
+GMAIL LABELS THE SCRIPT CREATES AUTOMATICALLY
+================================================================================
+
+_Processed        Every email the script has handled (prevents re-processing)
+_Urgent           Real legal/financial warnings
+_SuspectedScam    Flagged but not trashed (human decides)
+_DraftPending     Guest emails where a draft reply is waiting in Drafts
+_ColdEmail        Cold outreach in grace period before auto-trash
+_NeedsReview      Unclassified, needs human eyes
+
+
+================================================================================
+HOW THE COLD EMAIL GRACE PERIOD WORKS
+================================================================================
+
+Step 1: Cold email arrives.
+        Labeled _ColdEmail. Moved to archive.
+        Script records the date it was flagged.
+
+Step 2: Every day, a second script checks every _ColdEmail thread:
+        - Did Cesar reply to it?             -> RESCUED. Keep it.
+        - Did Cesar move it back to inbox?   -> RESCUED. Keep it.
+        - Still in archive after 10 days?    -> TRASHED automatically.
+
+Step 3: A daily summary email is sent listing what was trashed vs. rescued.
+
+Step 4: Trashed mail stays in Gmail Trash for 30 days (still recoverable).
+
+
+================================================================================
+HISTORICAL BACKLOG CLEANUP (ONE-TIME RUN)
+================================================================================
+
+A separate function handles the years of old inbox clutter.
+
+- Searches for emails older than 180 days in Promotions or Social categories,
+  or containing "unsubscribe"
+- SKIPS anything with client, urgent, or scam keywords
+- SKIPS anything from trusted or personal domain senders
+- Processes 50 threads per run, then automatically continues 2 minutes later
+  until the entire backlog is done
+- Sends a final summary email with grand totals when complete
+
+Run this ONCE to clean history.
+After that, the regular 10-minute script handles everything going forward.
+
+
+================================================================================
+NOTIFICATION EMAILS SENT TO CESAR
+================================================================================
+
+Situation                          Subject Line
+---------------------------------  --------------------------------------------
+Scam email detected                ATTENTION: X suspected scam email(s) flagged
+Urgent email detected              TMG Email Manager Summary Report
+Client draft prepared              TMG Email Manager Summary Report
+Cold email auto-trashed            Cold-Email Auto-Purge Report
+Unclassified email found           TMG Email Manager Summary Report
+Script crashes / error             TMG Email Manager Script Error
+Backlog cleanup complete           Historical Inbox Cleanup Report
+
+
+================================================================================
+SAFETY RULES — MUST NEVER BE BROKEN
+================================================================================
+
+1. DRY_RUN = true during ALL testing.
+   The script logs what it would do but changes nothing.
+   Only switch to false after testing confirms 0% errors.
+
+2. Never permanently delete.
+   Always move to Trash only (Gmail keeps trash for 30 days).
+
+3. Never auto-send.
+   Drafts are created, never sent. Cesar sends manually.
+
+4. Client, urgent, and scam emails are NEVER trashed under any circumstances.
+
+5. Trusted sender emails are NEVER trashed under any circumstances.
+
+6. Test on cesar@themarucagroup.com ONLY until confirmed working.
+   Then roll out to other accounts one at a time.
+
+
+================================================================================
+TESTING CHECKLIST BEFORE GOING LIVE
+================================================================================
+
+Send these test emails to cesar@themarucagroup.com and verify each one:
+
+TEST 1:
+  Send:    Subject: "Refund request for my villa stay"
+  Expect:  Label _DraftPending + draft reply appears in Gmail Drafts
+
+TEST 2:
+  Send:    Subject: "We offer cleaning services, hop on a call?"
+  Expect:  Label _ColdEmail + moved to archive
+
+TEST 3:
+  Send:    Subject: "Newsletter: Top 10 vacation deals" + unsubscribe in body
+  Expect:  Moved to Trash automatically
+
+TEST 4:
+  Send:    Subject: "URGENT: Wire transfer required to avoid legal action"
+  Expect:  Label _SuspectedScam
+
+TEST 5:
+  Send:    Subject: "IRS Compliance Notice - Tax Permit Required"
+  Expect:  Label _Urgent + marked Important
+
+TEST 6:
+  From:    noreply@booking.com
+  Subject: "Reservation confirmed"
+  Expect:  Label _Processed, left in inbox, no draft created
+
+TEST 7:
+  Send:    Subject: "Hello just checking in" (no keywords)
+  Expect:  Label _NeedsReview + notification email sent to Cesar
+
+All 7 tests must pass before switching DRY_RUN to false.
+
+
+================================================================================
+ACCOUNTS TO ROLL OUT TO (AFTER TESTING PASSES)
+================================================================================
+
+Account 1:  cesar@themarucagroup.com           <- TEST HERE FIRST
+Account 2:  reservations@themarucagroup.com
+Account 3:  [3rd TMG Gmail account]
+Account 4:  origamitravelservices@gmail.com
+Accounts 5-8: [remaining Gmail accounts]
+
+Roll out ONE account at a time.
+Confirm each account is working before moving to the next.
+
+
+================================================================================
+WHAT IS NOT IN THIS PLAN (SEPARATE PROJECTS FOR LATER)
+================================================================================
+
+EMAIL CENTER (app.TMG.com)
+  AI reads email + pulls reservation data from TMG API + drafts intelligent
+  replies using real booking data. Requires the TMG API to be working first.
+
+GHL CONTACT SYNC
+  Connecting the script to GoHighLevel so it can recognize homeowner emails
+  by name and domain. Requires GHL API access.
+
+GOOGLE DRIVE CLEANUP SCRIPTS
+  Separate scripts for deleting screenshots, zipping old videos, removing
+  duplicates. Not part of this email router.
+
+ICLOUD CLEANUP
+  Requires a script run locally from a Mac. Cannot be done via Google Apps
+  Script. iCloud has no public scripting API.
+
+
+================================================================================
+END OF PLAN
+================================================================================
